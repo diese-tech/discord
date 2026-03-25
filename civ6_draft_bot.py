@@ -45,12 +45,6 @@ from collections import defaultdict
 BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 PREFIX = "."
 
-if not BOT_TOKEN:
-    raise ValueError(
-        "No DISCORD_TOKEN found. Set it as an environment variable:\n"
-        "  export DISCORD_TOKEN=your_token_here\n"
-        "Or add it to your Railway project's Variables tab."
-    )
 
 # ─────────────────────────────────────────────
 # FULL LEADER POOL
@@ -281,6 +275,12 @@ def format_assignment(leaders):
 # ─────────────────────────────────────────────
 @client.event
 async def on_ready():
+    if not BOT_TOKEN:
+        raise ValueError(
+            "No DISCORD_TOKEN found. Set it as an environment variable:\n"
+            "  export DISCORD_TOKEN=your_token_here\n"
+            "Or add it to your Railway project's Variables tab."
+        )
     print(f"✅  Logged in as {client.user} (ID: {client.user.id})")
     print(f"    Leader pool: {len(ALL_LEADERS)} leaders")
     print("    Ready to draft!")
