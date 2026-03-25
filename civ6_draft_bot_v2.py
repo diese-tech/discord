@@ -30,6 +30,12 @@ FLOW:
   .trade @Player   — Offer to swap your full leader list with another player
   .canceldraft     — Host cancels the current session
   .leaders         — Show the current leader pool
+  .scrap <turn>    — Secret vote to scrap (turn-based threshold)
+  .afk @Player     — Start 5-min AFK countdown
+  .cancelafk @P    — Cancel an active AFK check
+  .quit @Player    — Log a quit/drop (tracks 3-drop policy)
+  .sub @Old @New   — Substitute a player mid-session
+  .remap <turn>    — Unanimous secret vote to remap (turn ≤10)
   .help            — Show all commands
 """
 
@@ -37,6 +43,9 @@ import discord
 import random
 import os
 import asyncio
+import json
+import uuid
+from pathlib import Path
 from collections import defaultdict
 
 # ─────────────────────────────────────────────
@@ -248,6 +257,154 @@ ALL_LEADERS = [
 ]
 
 # ─────────────────────────────────────────────
+# STATS STORAGE
+# ─────────────────────────────────────────────
+STATS_FILE   = Path("stats.json")
+REPORTS_FILE = Path("reports.json")
+
+def load_json(path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except Exception:
+        pass
+    return default
+
+def save_json(path, data):
+    path.write_text(json.dumps(data, indent=2))
+
+# stats[user_id] = {
+#   "name": str, "rating": float, "rd": float, "vol": float,
+#   "games": int, "wins": int, "cc_wins": int,
+#   "leaders": {"LeaderName": {"games": int, "wins": int}}
+# }
+stats   = load_json(STATS_FILE,   {})
+reports = load_json(REPORTS_FILE, {})  # report_id -> {players_in_order, channel_id, ts}
+
+GLICKO_Q     = 173.7178   # 400 / ln(10)
+GLICKO_START = {"rating": 1500.0, "rd": 350.0, "vol": 0.06}
+
+def get_player(uid, name):
+    uid = str(uid)
+    if uid not in stats:
+        stats[uid] = {**GLICKO_START, "name": name,
+                      "games": 0, "wins": 0, "cc_wins": 0, "leaders": {}}
+    else:
+        stats[uid]["name"] = name  # keep name fresh
+    return stats[uid]
+
+def glicko2_update(player, opponents):
+    """
+    Update a single player's Glicko-2 rating.
+    opponents = list of (opp_player_dict, score) where score=1 win, 0.5 draw, 0 loss
+    """
+    import math
+    mu  = (player["rating"] - 1500) / GLICKO_Q
+    phi = player["rd"] / GLICKO_Q
+    sig = player["vol"]
+
+    def g(rd):
+        return 1 / math.sqrt(1 + 3 * (rd / GLICKO_Q)**2 / math.pi**2)
+
+    def E(mu, mu_j, phi_j):
+        return 1 / (1 + math.exp(-g(phi_j) * (mu - mu_j)))
+
+    if not opponents:
+        # No games — increase RD slightly (inactivity)
+        phi_star = math.sqrt(phi**2 + sig**2)
+        player["rd"] = min(phi_star * GLICKO_Q, 350.0)
+        return
+
+    v_inv = sum(g(o["rd"]/GLICKO_Q)**2 * E(mu,(o["rating"]-1500)/GLICKO_Q,o["rd"]/GLICKO_Q) *
+                (1 - E(mu,(o["rating"]-1500)/GLICKO_Q,o["rd"]/GLICKO_Q))
+                for o, s in opponents)
+    v = 1 / v_inv if v_inv else 1
+
+    delta = v * sum(g(o["rd"]/GLICKO_Q) * (s - E(mu,(o["rating"]-1500)/GLICKO_Q,o["rd"]/GLICKO_Q))
+                    for o, s in opponents)
+
+    # Iterative volatility update (Illinois algorithm)
+    a = math.log(sig**2)
+    tau = 0.5
+    A = a
+    B = None
+    f = lambda x: (math.exp(x)*(delta**2 - phi**2 - v - math.exp(x)) /
+                   (2*(phi**2 + v + math.exp(x))**2) - (x - a) / tau**2)
+    if delta**2 > phi**2 + v:
+        B = math.log(delta**2 - phi**2 - v)
+    else:
+        k = 1
+        while f(a - k * tau) < 0:
+            k += 1
+        B = a - k * tau
+
+    fA, fB = f(A), f(B)
+    for _ in range(100):
+        C = A + (A - B) * fA / (fB - fA)
+        fC = f(C)
+        if fC * fB < 0:
+            A, fA = B, fB
+        else:
+            fA /= 2
+        B, fB = C, fC
+        if abs(B - A) < 1e-6:
+            break
+    new_sig = math.exp(A / 2)
+
+    phi_star = math.sqrt(phi**2 + new_sig**2)
+    new_phi  = 1 / math.sqrt(1/phi_star**2 + 1/v)
+    new_mu   = mu + new_phi**2 * sum(g(o["rd"]/GLICKO_Q) *
+                                     (s - E(mu,(o["rating"]-1500)/GLICKO_Q,o["rd"]/GLICKO_Q))
+                                     for o, s in opponents)
+
+    player["rating"] = new_mu * GLICKO_Q + 1500
+    player["rd"]     = max(new_phi * GLICKO_Q, 30.0)
+    player["vol"]    = new_sig
+
+def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
+    """
+    ordered_ids: list of user IDs from 1st to last place
+    Treat as pairwise: higher placement beats lower placement.
+    """
+    n = len(ordered_ids)
+    players_data = [get_player(uid, ordered_names[i]) for i, uid in enumerate(ordered_ids)]
+
+    # Build pairwise matchups for each player
+    for i, uid in enumerate(ordered_ids):
+        p = players_data[i]
+        opps = []
+        for j, opp_uid in enumerate(ordered_ids):
+            if i == j:
+                continue
+            score = 1.0 if i < j else 0.0  # lower index = higher placement = win
+            opps.append((players_data[j], score))
+        glicko2_update(p, opps)
+
+    # Update stats
+    for i, uid in enumerate(ordered_ids):
+        uid_s = str(uid)
+        stats[uid_s]["games"] += 1
+        if i == 0:
+            stats[uid_s]["wins"] += 1
+            if is_cc:
+                stats[uid_s]["cc_wins"] += 1
+
+    save_json(STATS_FILE, stats)
+
+    # Store report
+    report_id = str(uuid.uuid4())[:8].upper()
+    reports[report_id] = {
+        "ordered_ids":   [str(u) for u in ordered_ids],
+        "ordered_names": ordered_names,
+        "winner_id":     str(winner_id),
+        "is_cc":         is_cc,
+        "channel_id":    str(channel_id)
+    }
+    save_json(REPORTS_FILE, reports)
+    return report_id
+
+
+# ─────────────────────────────────────────────
 # BOT SETUP
 # ─────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -351,6 +508,52 @@ class TradeOffer:
         self.channel_id  = channel_id
         self.sender_id   = sender_id
         self.receiver_id = receiver_id
+
+
+# ─────────────────────────────────────────────
+# RULES SUMMARY (for .rules command)
+# ─────────────────────────────────────────────
+RULES_TEXT = """
+**⚔️  Competitive Civ 6 — Quick Rules**
+
+**1. Setup**
+• All games use BBG + BBG Expanded + BBM
+• Settings are voted via the bot before each game
+• Gold trading, strategics trading, and military alliances are always OFF
+• All game modes (Heroes, Secret Societies, etc.) are disabled by default
+
+**2. Conduct**
+• Respect all players — harassment results in removal
+• Do not leave without host approval
+• No bug abuse or external tools
+
+**3. CC Votes**
+• Nominate a player to win — requires the session turn threshold to have passed
+• The nominated player cannot vote for themselves
+• Secret ballot via DM, 2-minute timer, group decides on tally
+
+**4. Irrel Votes**
+• Eligible if: bottom 2 by score OR lost 3/5 of their empire
+• The nominated player cannot vote
+• Same DM ballot mechanic as CC votes
+
+**5. Victory**
+• All victory conditions are enabled
+• CC vote result = win for nominated player if group agrees
+• Time-limit games go to highest score
+
+**6. Reporting**
+• Report results with: `.report @1st @2nd @3rd ...`
+• Ratings use Glicko-2, starting at 1500
+• Incorrect reports: ask an admin to run `.override <report_id>`
+
+**7. Relobby**
+• Requires 66% agreement
+• Only for bugs, crashes, or desyncs in the first 10 turns
+• Max 2 relobbies per session
+
+Use `.leaderboard` for current standings. Full rulebook is pinned in this channel.
+"""
 
 
 # ─────────────────────────────────────────────
@@ -934,6 +1137,459 @@ async def on_message(message):
         if chunk:
             await message.channel.send(chunk)
 
+    # ── .report @1st @2nd @3rd ... ─────────────
+    elif cmd == "report":
+        if len(message.mentions) < 2:
+            await message.channel.send("❌  Usage: `.report @1st @2nd @3rd ...` (tag all players in finishing order)")
+            return
+
+        ordered_ids   = [m.id for m in message.mentions]
+        ordered_names = [m.display_name for m in message.mentions]
+        winner_id     = ordered_ids[0]
+
+        # Check if winner used a CC
+        is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
+
+        # Pull leader picks if available
+        session = drafts.get(cid)
+        if session:
+            for pid in ordered_ids:
+                uid_s = str(pid)
+                pick  = session.secret_picks.get(pid) or next(
+                    (session.assignments.get(pid, [None])[0],), None)
+                if pick and isinstance(pick, tuple):
+                    leader_name = pick[0]
+                    p = get_player(pid, session.player_names.get(pid, str(pid)))
+                    if leader_name not in p["leaders"]:
+                        p["leaders"][leader_name] = {"games": 0, "wins": 0}
+                    p["leaders"][leader_name]["games"] += 1
+                    if pid == winner_id:
+                        p["leaders"][leader_name]["wins"] += 1
+            save_json(STATS_FILE, stats)
+
+        report_id = process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
+        winner_name = message.mentions[0].display_name
+        await message.channel.send(
+            f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`"
+        )
+
+    # ── .override <report_id> @1st @2nd ... ────
+    elif cmd == "override":
+        parts2 = args.split()
+        if not parts2 or not message.mentions:
+            await message.channel.send("❌  Usage: `.override <report_id> @1st @2nd @3rd ...`")
+            return
+        report_id = parts2[0].upper()
+        if report_id not in reports:
+            await message.channel.send(f"❌  Report ID `{report_id}` not found.")
+            return
+
+        ordered_ids   = [m.id for m in message.mentions]
+        ordered_names = [m.display_name for m in message.mentions]
+        winner_id     = ordered_ids[0]
+
+        # Remove old report stats (best effort — recalculate from scratch not supported)
+        del reports[report_id]
+        save_json(REPORTS_FILE, reports)
+
+        new_id = process_report(ordered_ids, ordered_names, winner_id, False, cid)
+        await message.channel.send(
+            f"✅  Report `{report_id}` overridden. New report ID: `{new_id}`"
+        )
+
+    # ── .leaderboard ───────────────────────────
+    elif cmd == "leaderboard":
+        if not stats:
+            await message.channel.send("📊  No games have been reported yet.")
+            return
+
+        sorted_players = sorted(
+            stats.items(),
+            key=lambda x: x[1].get("rating", 1500),
+            reverse=True
+        )
+
+        lines = ["📊  **Leaderboard**\n"]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, p) in enumerate(sorted_players):
+            medal   = medals[i] if i < 3 else f"**{i+1}.**"
+            games   = p.get("games", 0)
+            wins    = p.get("wins", 0)
+            cc_wins = p.get("cc_wins", 0)
+            wr      = f"{round(wins/games*100)}%" if games > 0 else "—"
+            rating  = round(p.get("rating", 1500))
+            rd      = round(p.get("rd", 350))
+            name    = p.get("name", str(uid))
+
+            # Best leader by win rate (min 2 games)
+            leaders = p.get("leaders", {})
+            best_leader = "—"
+            best_wr = 0
+            most_played_leader = "—"
+            most_played = 0
+            for lname, ldata in leaders.items():
+                lg, lw = ldata.get("games", 0), ldata.get("wins", 0)
+                if lg > most_played:
+                    most_played = lg
+                    most_played_leader = lname
+                if lg >= 2:
+                    lwr = lw / lg
+                    if lwr > best_wr:
+                        best_wr = lwr
+                        best_leader = f"{lname} ({round(lwr*100)}%)"
+
+            lines.append(
+                f"{medal} **{name}** — {rating} ±{rd}\n"
+                f"  GP: {games}  W: {wins}  CC: {cc_wins}  WR: {wr}\n"
+                f"  Most played: {most_played_leader}  |  Best WR: {best_leader}"
+            )
+
+        # Split into chunks if needed
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 2 > 1900:
+                await message.channel.send(chunk)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await message.channel.send(chunk)
+
+    # ── .rules ─────────────────────────────────
+    elif cmd == "rules":
+        await message.channel.send(RULES_TEXT)
+
+
+    # ── .scrap ─────────────────────────────────
+    elif cmd == "scrap":
+        if cid not in drafts:
+            await message.channel.send("❌  No active session found.")
+            return
+        session = drafts[cid]
+        if uid not in session.players:
+            await message.channel.send("❌  You must be in the session to call a scrap vote.")
+            return
+
+        # Determine threshold based on turn number
+        try:
+            turn = int(args) if args.strip().isdigit() else None
+        except:
+            turn = None
+
+        if turn is None:
+            await message.channel.send(
+                "❌  Please include the current turn number: `.scrap <turn>`\ne.g. `.scrap 45`"
+            )
+            return
+
+        if turn <= 20:
+            threshold_label = "2/3 majority"
+            needed = max(1, round(len(session.players) * 2 / 3))
+        elif turn <= 50:
+            threshold_label = "3/4 majority"
+            needed = max(1, round(len(session.players) * 3 / 4))
+        elif turn <= 70:
+            threshold_label = "all but 1"
+            needed = max(1, len(session.players) - 1)
+        else:
+            threshold_label = "unanimous"
+            needed = len(session.players)
+
+        voter_ids = list(session.players)
+        notice = await message.channel.send(
+            f"🗑️  **Scrap Vote** — called by **{uname}** on turn **{turn}**.\nThreshold: **{threshold_label}** ({needed}/{len(voter_ids)} votes needed).\nBallots sent via DM. ⏱️  2 minutes to vote."
+        )
+
+        failed = []
+        dm_msg_ids = {}
+        for pid in voter_ids:
+            try:
+                voter = await client.fetch_user(pid)
+                dm = await voter.send(
+                    f"🗑️  **Secret Scrap Vote** — end the game now? (Turn {turn})\nReact 👍 for Yes (scrap) or 👎 for No. You have **2 minutes**."
+                )
+                await dm.add_reaction("👍")
+                await dm.add_reaction("👎")
+                timed_vote_dm_data[dm.id] = {
+                    "channel_id": cid, "vote_id": notice.id,
+                    "user_id": pid, "kind": "scrap", "voted": False,
+                }
+                dm_msg_ids[pid] = dm.id
+            except discord.Forbidden:
+                failed.append(session.player_names.get(pid, str(pid)))
+
+        if failed:
+            await message.channel.send(f"⚠️  Could not DM: **{', '.join(failed)}**")
+
+        async def scrap_timeout():
+            await asyncio.sleep(120)
+            if notice.id not in active_timed_votes:
+                return
+            del active_timed_votes[notice.id]
+
+            yay = nay = 0
+            voted = set()
+            for pid, dm_id in dm_msg_ids.items():
+                try:
+                    voter = await client.fetch_user(pid)
+                    dm_ch = voter.dm_channel or await voter.create_dm()
+                    dm_msg = await dm_ch.fetch_message(dm_id)
+                    for r in dm_msg.reactions:
+                        if str(r.emoji) == "👍":
+                            async for u in r.users():
+                                if u.id == pid: yay += 1; voted.add(pid)
+                        if str(r.emoji) == "👎":
+                            async for u in r.users():
+                                if u.id == pid: nay += 1; voted.add(pid)
+                    await dm_msg.edit(content="✅  This scrap vote has closed.")
+                    await dm_msg.clear_reactions()
+                    timed_vote_dm_data.pop(dm_id, None)
+                except Exception:
+                    pass
+
+            did_not_vote = [pid for pid in voter_ids if pid not in voted]
+            dnv_str = ""
+            if did_not_vote:
+                names = ", ".join(session.player_names.get(p, str(p)) for p in did_not_vote)
+                dnv_str = f"\n⚠️  Did not vote: **{names}**"
+
+            passed = yay >= needed
+            result = "✅  **SCRAP PASSED**" if passed else "❌  **Scrap failed**"
+            try:
+                await notice.edit(content=(
+                    f"🗑️  **Scrap Vote — CLOSED** (Turn {turn}, needed {needed})\n{result} — 👍 Yes: **{yay}**   👎 No: **{nay}**{dnv_str}"
+                ))
+            except Exception:
+                await message.channel.send(
+                    f"🗑️  **Scrap Vote — CLOSED** (Turn {turn})\n{result} — 👍 Yes: **{yay}**   👎 No: **{nay}**{dnv_str}"
+                )
+
+        task = asyncio.create_task(scrap_timeout())
+        active_timed_votes[notice.id] = task
+
+    # ── .afk @player ───────────────────────────
+    elif cmd == "afk":
+        if not message.mentions:
+            await message.channel.send("❌  Usage: `.afk @PlayerName`")
+            return
+        target = message.mentions[0]
+        notice = await message.channel.send(
+            f"⏳  **AFK Check** — **{target.display_name}** has been flagged as AFK by **{uname}**.\n**{target.mention}** — please respond in this channel within **5 minutes** or the host may kick you.\nGame should be paused now."
+        )
+
+        async def afk_timeout():
+            await asyncio.sleep(300)
+            if notice.id not in active_timed_votes:
+                return
+            del active_timed_votes[notice.id]
+            try:
+                await notice.edit(content=(
+                    f"⏳  **AFK Check — EXPIRED** — **{target.display_name}** did not respond.\nHost may now kick **{target.mention}** at the start of the next turn.\nA kicked AFK player must be reported as a quitter."
+                ))
+            except Exception:
+                await message.channel.send(
+                    f"⏳  AFK timer expired for **{target.display_name}**. "
+                    f"Host may kick at the start of the next turn."
+                )
+
+        task = asyncio.create_task(afk_timeout())
+        active_timed_votes[notice.id] = task
+
+    # ── .cancelafk ─────────────────────────────
+    elif cmd == "cancelafk":
+        # Allow player or host to cancel an active AFK timer
+        if not message.mentions:
+            await message.channel.send("❌  Usage: `.cancelafk @PlayerName`")
+            return
+        target = message.mentions[0]
+        cancelled = False
+        for msg_id, task in list(active_timed_votes.items()):
+            # We can't easily match by target here, so we cancel all AFK notices
+            # that mention the target. Best-effort lookup via channel messages.
+            try:
+                fetched = await message.channel.fetch_message(msg_id)
+                if "AFK Check" in fetched.content and target.display_name in fetched.content:
+                    task.cancel()
+                    del active_timed_votes[msg_id]
+                    await fetched.edit(content=f"✅  AFK check for **{target.display_name}** cancelled — they have returned.")
+                    cancelled = True
+                    break
+            except Exception:
+                pass
+        if not cancelled:
+            await message.channel.send(f"ℹ️  No active AFK check found for **{target.display_name}**.")
+
+    # ── .quit @player ──────────────────────────
+    elif cmd == "quit":
+        if not message.mentions:
+            await message.channel.send("❌  Usage: `.quit @PlayerName`")
+            return
+        target    = message.mentions[0]
+        tid       = str(target.id)
+        n_drops   = 0
+
+        # Load drop counts from stats
+        if tid not in stats:
+            get_player(target.id, target.display_name)
+        if "drops" not in stats[tid]:
+            stats[tid]["drops"] = 0
+        stats[tid]["drops"] += 1
+        n_drops = stats[tid]["drops"]
+        save_json(STATS_FILE, stats)
+
+        # Remove from active session if present
+        session = drafts.get(cid)
+        if session and target.id in session.players:
+            session.players.remove(target.id)
+            session.player_count = len(session.players)
+
+        suffix = ""
+        if n_drops == 3:
+            suffix = (f"\n⚠️  **{target.display_name}** has hit the **3-drop threshold**. Remaining players may vote to remove them from the game by secret majority vote.")
+        elif n_drops > 3:
+            suffix = f"\n⚠️  **{target.display_name}** has **{n_drops} drops** recorded this game."
+
+        await message.channel.send(
+            f"📋  **Quit logged** — **{target.display_name}** has left the game (drop #{n_drops}/3 penalty-free).{suffix}"
+        )
+
+    # ── .sub @old @new ─────────────────────────
+    elif cmd == "sub":
+        if len(message.mentions) < 2:
+            await message.channel.send("❌  Usage: `.sub @OldPlayer @NewPlayer`")
+            return
+        old_player = message.mentions[0]
+        new_player = message.mentions[1]
+        session = drafts.get(cid)
+
+        if session:
+            if old_player.id not in session.players:
+                await message.channel.send(f"❌  **{old_player.display_name}** is not in the current session.")
+                return
+            # Swap in session
+            idx = session.players.index(old_player.id)
+            session.players[idx] = new_player.id
+            session.player_names[new_player.id] = new_player.display_name
+
+            # Transfer assignments if draft has happened
+            if old_player.id in session.assignments:
+                session.assignments[new_player.id] = session.assignments.pop(old_player.id)
+            if old_player.id in session.secret_picks:
+                session.secret_picks[new_player.id] = session.secret_picks.pop(old_player.id)
+
+        # Transfer stats record if exists
+        old_id = str(old_player.id)
+        new_id = str(new_player.id)
+        if old_id in stats:
+            # Ensure new player has a record
+            get_player(new_player.id, new_player.display_name)
+        save_json(STATS_FILE, stats)
+
+        await message.channel.send(
+            f"🔄  **Sub recorded** — **{old_player.display_name}** has been replaced by **{new_player.display_name}**.\nNote: The subbed-out player must wait **60 minutes** before joining a new game."
+        )
+
+    # ── .remap ─────────────────────────────────
+    elif cmd == "remap":
+        if cid not in drafts:
+            await message.channel.send("❌  No active session found.")
+            return
+        session = drafts[cid]
+        if uid not in session.players:
+            await message.channel.send("❌  You must be in the session to request a remap.")
+            return
+
+        # Parse optional turn number
+        try:
+            turn = int(args) if args.strip().isdigit() else None
+        except:
+            turn = None
+
+        if turn is None:
+            await message.channel.send(
+                "❌  Please include the current turn number: `.remap <turn>`\ne.g. `.remap 7`"
+            )
+            return
+
+        if turn > 10:
+            await message.channel.send(
+                f"❌  Remap requests are only valid on or before **turn 10**. "
+                f"Current turn is {turn}."
+            )
+            return
+
+        voter_ids = [pid for pid in session.players if pid != uid]
+        notice = await message.channel.send(
+            f"🗺️  **Remap Request** — **{uname}** is requesting a remap (turn {turn}).\nThreshold: **Unanimous** ({len(voter_ids)} votes needed).\nBallots sent via DM. ⏱️  2 minutes to vote.\n\n📌  *Automatic remaps apply if: you cannot settle 3 cities within 5 tiles on Pangaea/Highlands/Seven Seas/Lakes, or 2 cities on other maps before Shipbuilding, or if spawn is off-coast/off-fresh-water.*"
+        )
+
+        failed = []
+        dm_msg_ids = {}
+        for pid in voter_ids:
+            try:
+                voter = await client.fetch_user(pid)
+                dm = await voter.send(
+                    f"🗺️  **Secret Remap Vote** — **{uname}** wants a remap (turn {turn}).\nReact 👍 to agree or 👎 to deny. **Unanimous** agreement required. 2 minutes."
+                )
+                await dm.add_reaction("👍")
+                await dm.add_reaction("👎")
+                timed_vote_dm_data[dm.id] = {
+                    "channel_id": cid, "vote_id": notice.id,
+                    "user_id": pid, "kind": "remap", "voted": False,
+                }
+                dm_msg_ids[pid] = dm.id
+            except discord.Forbidden:
+                failed.append(session.player_names.get(pid, str(pid)))
+
+        if failed:
+            await message.channel.send(f"⚠️  Could not DM: **{', '.join(failed)}**")
+
+        async def remap_timeout():
+            await asyncio.sleep(120)
+            if notice.id not in active_timed_votes:
+                return
+            del active_timed_votes[notice.id]
+
+            yay = nay = 0
+            voted = set()
+            for pid, dm_id in dm_msg_ids.items():
+                try:
+                    voter = await client.fetch_user(pid)
+                    dm_ch = voter.dm_channel or await voter.create_dm()
+                    dm_msg = await dm_ch.fetch_message(dm_id)
+                    for r in dm_msg.reactions:
+                        if str(r.emoji) == "👍":
+                            async for u in r.users():
+                                if u.id == pid: yay += 1; voted.add(pid)
+                        if str(r.emoji) == "👎":
+                            async for u in r.users():
+                                if u.id == pid: nay += 1; voted.add(pid)
+                    await dm_msg.edit(content="✅  This remap vote has closed.")
+                    await dm_msg.clear_reactions()
+                    timed_vote_dm_data.pop(dm_id, None)
+                except Exception:
+                    pass
+
+            did_not_vote = [pid for pid in voter_ids if pid not in voted]
+            dnv_str = ""
+            if did_not_vote:
+                names = ", ".join(session.player_names.get(p, str(p)) for p in did_not_vote)
+                dnv_str = f"\n⚠️  Did not vote: **{names}**"
+
+            passed = yay == len(voter_ids) and nay == 0
+            result = "✅  **REMAP PASSED** — relobby the game!" if passed else "❌  **Remap denied**"
+            try:
+                await notice.edit(content=(
+                    f"🗺️  **Remap Vote — CLOSED** (Turn {turn}, unanimous required)\n{result} — 👍 Agree: **{yay}**   👎 Deny: **{nay}**{dnv_str}"
+                ))
+            except Exception:
+                await message.channel.send(
+                    f"🗺️  **Remap Vote — CLOSED** (Turn {turn})\n{result} — 👍 Agree: **{yay}**   👎 Deny: **{nay}**{dnv_str}"
+                )
+
+        task = asyncio.create_task(remap_timeout())
+        active_timed_votes[notice.id] = task
+
+
     # ── .help ──────────────────────────────────
     elif cmd == "help":
         await message.channel.send(
@@ -948,6 +1604,16 @@ async def on_message(message):
             "`.irrel @Player` — Start a 2-min vote to mark a player as irrelevant\n"
             "`.canceldraft` — Host: cancel the current session\n"
             "`.leaders` — Show all leaders in the current pool\n"
+            "`.report @1st @2nd ...` — Report a game result in finishing order\n"
+            "`.override <id> @1st @2nd ...` — Correct an incorrect report\n"
+            "`.leaderboard` — Show the current Glicko-2 standings\n"
+            "`.scrap <turn>` — Secret DM vote to scrap the game (turn-based threshold)\n"
+            "`.afk @Player` — Start a 5-min AFK countdown for a player\n"
+            "`.cancelafk @Player` — Cancel an active AFK check\n"
+            "`.quit @Player` — Log a player quit/drop (tracks 3-drop policy)\n"
+            "`.sub @Old @New` — Substitute one player for another\n"
+            "`.remap <turn>` — Secret DM vote to remap (unanimous, turn ≤10)\n"
+            "`.rules` — Post the quick rules summary\n"
             "`.help` — Show this message\n"
         )
 
