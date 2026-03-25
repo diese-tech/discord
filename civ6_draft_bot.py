@@ -13,25 +13,24 @@ SETUP INSTRUCTIONS:
 
 3. Set your bot token as an environment variable named DISCORD_TOKEN
    (On Railway: add it under your project's Variables tab)
-   (Locally: set it in your terminal before running, e.g. export DISCORD_TOKEN=yourtoken)
+   (Locally: export DISCORD_TOKEN=yourtoken)
 
-4. Invite the bot to your server with these permissions:
-   - Send Messages
-   - Read Message History
-   - Add Reactions
+4. Invite the bot with permissions: Send Messages, Read Message History, Add Reactions
 
 5. Run:
        python civ6_draft_bot.py
 
-COMMANDS:
-  .draft <number_of_players>   — Start a new draft lobby
-  .join                        — Join the current lobby
-  .vote                        — Vote for secret draft (majority wins)
-  .ban <Leader Name>           — Nominate a leader for a ban vote
-  .startdraft                  — Host only: begin the draft once all players joined
-  .canceldraft                 — Host only: cancel the current draft
-  .leaders                     — List all leaders in the pool
-  .help                        — Show all commands
+FLOW:
+  .draft <n>       — Host opens a lobby for n players
+  .join            — Players join the lobby
+  .vote            — Host kicks off the settings + ban vote (all lines post at once)
+  .closevote       — Host closes voting and tallies all results
+  .ban <Leader>    — Nominate a civ leader for a ban (majority auto-bans)
+  .startdraft      — Host starts the leader draft after voting is done
+  .trade @Player   — Offer to swap your full leader list with another player
+  .canceldraft     — Host cancels the current session
+  .leaders         — Show the current leader pool
+  .help            — Show all commands
 """
 
 import discord
@@ -45,152 +44,226 @@ from collections import defaultdict
 BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 PREFIX = "."
 
+if not BOT_TOKEN:
+    raise ValueError(
+        "No DISCORD_TOKEN found. Set it as an environment variable:\n"
+        "  export DISCORD_TOKEN=your_token_here\n"
+        "Or add it to your Railway project's Variables tab."
+    )
+
+# ─────────────────────────────────────────────
+# SETTINGS DEFINITIONS
+# Each setting: (label, [(emoji, option_text), ...])
+# For settings with many options we use letter emojis.
+# ─────────────────────────────────────────────
+SETTINGS = [
+    ("🤝 Official Friends/Allies", [
+        ("0️⃣", "0"),
+        ("1️⃣", "1"),
+        ("2️⃣", "2"),
+        ("♾️", "Infinite"),
+    ]),
+    ("🏛️ BYC Mode (Capitals Only)", [
+        ("🔴", "Maximum"),
+        ("🟡", "Balanced"),
+        ("🟢", "Off"),
+    ]),
+    ("⏱️ Game Duration", [
+        ("2️⃣", "2 Hours"),
+        ("4️⃣", "4 Hours"),
+        ("6️⃣", "6 Hours"),
+        ("♾️", "Unlimited"),
+    ]),
+    ("🗺️ Map", [
+        ("🅰️", "Pangaea"),
+        ("🅱️", "7 Seas"),
+        ("🇨", "Highlands"),
+        ("🇩", "Highlands (Rich)"),
+        ("🇪", "Lakes"),
+        ("🇫", "Inland Sea"),
+        ("🇬", "Primordial"),
+        ("🇭", "Tilted Axis"),
+        ("🇮", "Tilted Axis Wraparound"),
+        ("🇯", "Continents"),
+        ("🇰", "Continents & Islands"),
+        ("🇱", "Small Continents"),
+        ("🇲", "Wetlands"),
+        ("🇳", "Fractal"),
+        ("🇴", "Splintered Fractal"),
+        ("🇵", "Island Plates"),
+        ("🇶", "Terra"),
+    ]),
+    ("🌊 Sea Level", [
+        ("⬇️", "Low"),
+        ("➡️", "Standard"),
+        ("⬆️", "High"),
+    ]),
+    ("🌋 Disasters", [
+        ("1️⃣", "1"),
+        ("2️⃣", "2"),
+        ("3️⃣", "3"),
+        ("4️⃣", "4"),
+    ]),
+    ("⚔️ Barbarians Mode", [
+        ("🚫", "No Barbs"),
+        ("🟢", "Normal"),
+        ("🤝", "Civilized"),
+        ("💀", "Raging"),
+    ]),
+    ("🗳️ CC Voting", [
+        ("⏪", "20 Turns Earlier"),
+        ("◀️", "10 Turns Earlier"),
+        ("⏺️", "Standard"),
+        ("▶️", "10 Turns Later"),
+        ("⏩", "20 Turns Later"),
+    ]),
+    ("🎲 Draft Mode", [
+        ("📢", "Public"),
+        ("🤫", "Secret"),
+    ]),
+    ("💰 Gold Trading", [
+        ("✅", "Allowed"),
+        ("❌", "Not Allowed"),
+    ]),
+    ("💎 Luxuries Trading", [
+        ("✅", "Allowed"),
+        ("❌", "Not Allowed"),
+    ]),
+    ("⚙️ Strategics Trading", [
+        ("✅", "Allowed"),
+        ("❌", "Not Allowed"),
+    ]),
+    ("🤜 Military Alliance", [
+        ("✅", "Allowed"),
+        ("❌", "Not Allowed"),
+    ]),
+    ("⏲️ Timer", [
+        ("🏆", "Competitive"),
+        ("⚡", "Blitz"),
+        ("🔄", "Dynamic"),
+        ("🔕", "Off"),
+    ]),
+    ("🌾 Resources", [
+        ("📉", "Scarce"),
+        ("➡️", "Standard"),
+        ("📈", "Abundant"),
+    ]),
+    ("🪨 Strategics", [
+        ("📉", "Scarce"),
+        ("➡️", "Standard"),
+        ("📈", "Abundant"),
+    ]),
+]
+
+# Full natural wonder list (BBG 7.3 + BBM additions)
+ALL_WONDERS = [
+    "Barringer Crater", "Bermuda Triangle", "Bioluminescent Bay",
+    "Cerro de Potosi", "Chocolate Hills", "Cliffs of Dover",
+    "Crater Lake", "Dallol", "Dead Sea", "Delicate Arch",
+    "Mato Tipila", "Mount Everest", "Eye of the Sahara",
+    "Eyjafjallajökull", "Fountain of Youth", "Galápagos Islands",
+    "Giant's Causeway", "Rock of Gibraltar", "Gobustan",
+    "Grand Mesa", "Great Barrier Reef", "Hạ Long Bay", "Ik-Kil",
+    "Mount Kailash", "Mount Kilimanjaro", "Krakatoa", "Lake Retba",
+    "Lake Victoria", "Lençóis Maranhenses", "Lysefjord", "Matterhorn",
+    "Mosi-oa-Tunya", "Motlatse Canyon", "Namib Sand Sea", "Old Faithful",
+    "Lakes of Ounianga", "Païtiti", "Pamukkale", "Pantanal", "Piopiotahi",
+    "Mount Roraima", "Salar de Uyuni", "Mount Sinai", "Sri Pada",
+    "Torres del Paine", "Tsingy de Bemaraha", "Ubsunur Hollow", "Uluru",
+    "Mount Vesuvius", "Vredefort Dome", "Sahara el Beyda", "Wulingyuan",
+    "Yosemite", "Zhangye Danxia",
+]
 
 # ─────────────────────────────────────────────
 # FULL LEADER POOL
 # Base game + Rise & Fall + Gathering Storm +
 # New Frontier Pass + BBG Expanded mod leaders
-# Source: https://civ6bbg.github.io/en_US/leaders_7.2.html
 # ─────────────────────────────────────────────
 ALL_LEADERS = [
-    # ── AMERICA ──
     ("Abraham Lincoln",                   "America"),
     ("Teddy Roosevelt (Bull Moose)",       "America"),
     ("Teddy Roosevelt (Rough Rider)",      "America"),
-    # ── ARABIA ──
     ("Saladin (Vizier)",                   "Arabia"),
     ("Saladin (Sultan)",                   "Arabia"),
-    # ── AUSTRALIA ──
     ("John Curtin",                        "Australia"),
-    # ── AZTEC ──
     ("Montezuma",                          "Aztec"),
-    # ── BABYLON ──
     ("Hammurabi",                          "Babylon"),
-    # ── BRAZIL ──
     ("Pedro II",                           "Brazil"),
-    # ── BYZANTIUM ──
     ("Basil II",                           "Byzantium"),
     ("Theodora",                           "Byzantium"),
-    # ── CANADA ──
     ("Wilfrid Laurier",                    "Canada"),
-    # ── CHINA ──
     ("Kublai Khan (China)",                "China"),
     ("Qin Shi Huang (Mandate of Heaven)",  "China"),
     ("Qin Shi Huang (Unifier)",            "China"),
     ("Wu Zetian",                          "China"),
     ("Yongle",                             "China"),
-    # ── CREE ──
     ("Poundmaker",                         "Cree"),
-    # ── EGYPT ──
     ("Cleopatra (Egyptian)",               "Egypt"),
     ("Cleopatra (Ptolemaic)",              "Egypt"),
     ("Ramses II",                          "Egypt"),
-    # ── ENGLAND ──
     ("Eleanor of Aquitaine (England)",     "England"),
     ("Elizabeth I",                        "England"),
     ("Victoria (Age of Empire)",           "England"),
     ("Victoria (Age of Steam)",            "England"),
-    # ── ETHIOPIA ──
     ("Menelik II",                         "Ethiopia"),
-    # ── FRANCE ──
     ("Catherine de Medici (Black Queen)",  "France"),
     ("Catherine de Medici (Magnificence)", "France"),
     ("Eleanor of Aquitaine (France)",      "France"),
-    # ── GAUL ──
     ("Ambiorix",                           "Gaul"),
-    ("Vercingetorix",                      "Gaul"),        # BBG Expanded
-    # ── GEORGIA ──
+    ("Vercingetorix",                      "Gaul"),
     ("Tamar",                              "Georgia"),
-    # ── GERMANY ──
     ("Frederick Barbarossa",               "Germany"),
     ("Ludwig II",                          "Germany"),
-    # ── GRAN COLOMBIA ──
     ("Simón Bolívar",                      "Gran Colombia"),
-    # ── GREECE ──
     ("Gorgo",                              "Greece"),
     ("Pericles",                           "Greece"),
-    # ── HUNGARY ──
     ("Matthias Corvinus",                  "Hungary"),
-    # ── INCA ──
     ("Pachacuti",                          "Inca"),
-    # ── INDIA ──
     ("Chandragupta",                       "India"),
     ("Gandhi",                             "India"),
-    # ── INDONESIA ──
     ("Gitarja",                            "Indonesia"),
-    # ── JAPAN ──
     ("Hojo Tokimune",                      "Japan"),
     ("Tokugawa",                           "Japan"),
-    # ── KHMER ──
     ("Jayavarman VII",                     "Khmer"),
-    # ── KONGO ──
     ("Mvemba a Nzinga",                    "Kongo"),
     ("Nzinga Mbande",                      "Kongo"),
-    # ── KOREA ──
     ("Sejong",                             "Korea"),
     ("Seondeok",                           "Korea"),
-    # ── MACEDON ──
     ("Alexander",                          "Macedon"),
-    ("Olympias",                           "Macedon"),     # BBG Expanded
-    # ── MALI ──
+    ("Olympias",                           "Macedon"),
     ("Mansa Musa",                         "Mali"),
     ("Sundiata Keita",                     "Mali"),
-    # ── MĀORI ──
     ("Kupe",                               "Māori"),
-    # ── MAPUCHE ──
     ("Lautaro",                            "Mapuche"),
-    # ── MAYA ──
     ("Lady Six Sky",                       "Maya"),
-    ("Te' K'inich II",                     "Maya"),        # BBG Expanded
-    # ── MONGOLIA ──
+    ("Te' K'inich II",                     "Maya"),
     ("Genghis Khan",                       "Mongolia"),
     ("Kublai Khan (Mongolia)",             "Mongolia"),
-    # ── NETHERLANDS ──
     ("Wilhelmina",                         "Netherlands"),
-    # ── NORWAY ──
     ("Harald Hardrada (Varangian)",        "Norway"),
     ("Harald Hardrada (Konge)",            "Norway"),
-    # ── NUBIA ──
     ("Amanitore",                          "Nubia"),
-    # ── OTTOMANS ──
     ("Suleiman (Kanuni)",                  "Ottomans"),
     ("Suleiman (Muhteşem)",                "Ottomans"),
-    # ── PERSIA ──
     ("Cyrus",                              "Persia"),
     ("Nader Shah",                         "Persia"),
-    # ── PHOENICIA ──
     ("Dido",                               "Phoenicia"),
-    ("Ahiram",                             "Phoenicia"),   # BBG Expanded
-    # ── POLAND ──
+    ("Ahiram",                             "Phoenicia"),
     ("Jadwiga",                            "Poland"),
-    # ── PORTUGAL ──
     ("João III",                           "Portugal"),
-    # ── ROME ──
     ("Julius Caesar",                      "Rome"),
     ("Trajan",                             "Rome"),
-    # ── RUSSIA ──
     ("Peter",                              "Russia"),
-    # ── SCOTLAND ──
     ("Robert the Bruce",                   "Scotland"),
-    # ── SCYTHIA ──
     ("Tomyris",                            "Scythia"),
-    # ── SPAIN ──
     ("Philip II",                          "Spain"),
-    # ── SUMERIA ──
     ("Gilgamesh",                          "Sumeria"),
-    # ── SWAHILI ──
-    ("Al-Hasan ibn Sulaiman",              "Swahili"),     # BBG Expanded
-    # ── SWEDEN ──
+    ("Al-Hasan ibn Sulaiman",              "Swahili"),
     ("Kristina",                           "Sweden"),
-    # ── TEOTIHUACÁN ──
-    ("Spearthrower Owl",                   "Teotihuacán"), # BBG Expanded
-    # ── THULE ──
-    ("Kiviuq",                             "Thule"),       # BBG Expanded
-    # ── TIBET ──
-    ("Trisong Detsen",                     "Tibet"),       # BBG Expanded
-    # ── VIETNAM ──
+    ("Spearthrower Owl",                   "Teotihuacán"),
+    ("Kiviuq",                             "Thule"),
+    ("Trisong Detsen",                     "Tibet"),
     ("Bà Triệu",                           "Vietnam"),
-    # ── ZULU ──
     ("Shaka",                              "Zulu"),
 ]
 
@@ -200,42 +273,56 @@ ALL_LEADERS = [
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+intents.voice_states = True
 client = discord.Client(intents=intents)
 
 # ─────────────────────────────────────────────
-# DRAFT STATE  (one active draft per channel)
+# STATE
 # ─────────────────────────────────────────────
-drafts = {}   # channel_id -> DraftSession
+drafts        = {}   # channel_id -> DraftSession
+pending_trades = {}  # message_id -> TradeOffer
 
+# ─────────────────────────────────────────────
+# DATA CLASSES
+# ─────────────────────────────────────────────
 class DraftSession:
     def __init__(self, host_id, host_name, player_count, channel_id):
-        self.host_id       = host_id
-        self.host_name     = host_name
-        self.player_count  = player_count
-        self.channel_id    = channel_id
+        self.host_id        = host_id
+        self.host_name      = host_name
+        self.player_count   = player_count
+        self.channel_id     = channel_id
 
-        self.players       = [host_id]
-        self.player_names  = {host_id: host_name}
+        self.players        = [host_id]
+        self.player_names   = {host_id: host_name}
 
-        self.banned_leaders    = set()
-        self.ban_nominations   = {}
-        self.secret_votes      = set()
-        self.is_secret         = False
-        self.assignments       = {}
-        self.started           = False
+        # Leader ban system
+        self.banned_leaders   = set()
+        self.ban_nominations  = {}
 
-    def is_host(self, user_id):
-        return user_id == self.host_id
+        # Wonder ban system
+        self.banned_wonders   = set()
+        self.wonder_nominations = {}
 
-    def add_player(self, user_id, user_name):
-        if user_id not in self.players:
-            self.players.append(user_id)
-            self.player_names[user_id] = user_name
+        # Settings vote
+        self.voting_open      = False
+        self.vote_messages    = {}   # message_id -> (setting_label, [(emoji, option)])
+        self.vote_results     = {}   # setting_label -> winning option text
+
+        # Draft
+        self.assignments      = {}
+        self.started          = False
+        self.is_secret        = False
+
+    def is_host(self, uid): return uid == self.host_id
+
+    def add_player(self, uid, uname):
+        if uid not in self.players:
+            self.players.append(uid)
+            self.player_names[uid] = uname
             return True
         return False
 
-    def is_full(self):
-        return len(self.players) >= self.player_count
+    def is_full(self): return len(self.players) >= self.player_count
 
     def available_pool(self):
         return [(l, c) for (l, c) in ALL_LEADERS if l not in self.banned_leaders]
@@ -244,23 +331,36 @@ class DraftSession:
         pool = self.available_pool()
         random.shuffle(pool)
         n = len(self.players)
-        per_player = len(pool) // n
+        per_player = min(10, len(pool) // n)
         for i, uid in enumerate(self.players):
             self.assignments[uid] = pool[i * per_player:(i + 1) * per_player]
         self.started = True
-        self.is_secret = len(self.secret_votes) > (len(self.players) / 2)
 
-    def ban_vote_result(self, leader_key):
-        votes = len(self.ban_nominations.get(leader_key, set()))
+    def ban_vote_result(self, key, nominations_dict):
+        votes  = len(nominations_dict.get(key, set()))
         needed = max(2, (len(self.players) // 2) + 1)
         return votes >= needed
 
-    def format_leader_key(self, name):
+    def find_leader(self, name):
         name_lower = name.lower()
         for (l, c) in ALL_LEADERS:
             if l.lower() == name_lower:
                 return l
         return None
+
+    def find_wonder(self, name):
+        name_lower = name.lower()
+        for w in ALL_WONDERS:
+            if w.lower() == name_lower:
+                return w
+        return None
+
+
+class TradeOffer:
+    def __init__(self, channel_id, sender_id, receiver_id):
+        self.channel_id  = channel_id
+        self.sender_id   = sender_id
+        self.receiver_id = receiver_id
 
 
 # ─────────────────────────────────────────────
@@ -269,20 +369,24 @@ class DraftSession:
 def format_assignment(leaders):
     return "\n".join(f"  • **{l}** ({c})" for l, c in leaders)
 
+def majority_winner(reaction_counts, options):
+    """Given {emoji: count}, return the option text with the most votes."""
+    best_emoji = max(reaction_counts, key=lambda e: reaction_counts[e], default=None)
+    if best_emoji is None:
+        return "No votes"
+    for emoji, text in options:
+        if emoji == best_emoji:
+            return text
+    return "No votes"
+
 
 # ─────────────────────────────────────────────
 # EVENT: on_ready
 # ─────────────────────────────────────────────
 @client.event
 async def on_ready():
-    if not BOT_TOKEN:
-        raise ValueError(
-            "No DISCORD_TOKEN found. Set it as an environment variable:\n"
-            "  export DISCORD_TOKEN=your_token_here\n"
-            "Or add it to your Railway project's Variables tab."
-        )
     print(f"✅  Logged in as {client.user} (ID: {client.user.id})")
-    print(f"    Leader pool: {len(ALL_LEADERS)} leaders")
+    print(f"    Leader pool: {len(ALL_LEADERS)} leaders | {len(ALL_WONDERS)} wonders")
     print("    Ready to draft!")
 
 
@@ -296,43 +400,35 @@ async def on_message(message):
     if not message.content.startswith(PREFIX):
         return
 
-    parts   = message.content[len(PREFIX):].strip().split(None, 1)
-    cmd     = parts[0].lower() if parts else ""
-    args    = parts[1].strip() if len(parts) > 1 else ""
-    cid     = message.channel.id
-    uid     = message.author.id
-    uname   = message.author.display_name
+    parts = message.content[len(PREFIX):].strip().split(None, 1)
+    cmd   = parts[0].lower() if parts else ""
+    args  = parts[1].strip() if len(parts) > 1 else ""
+    cid   = message.channel.id
+    uid   = message.author.id
+    uname = message.author.display_name
 
-    # ── .draft <n> ────────────────────────────
+    # ── .draft ────────────────────────────────
     if cmd == "draft":
         if cid in drafts and not drafts[cid].started:
-            await message.channel.send(
-                "⚠️  A draft is already open! Use `.canceldraft` to cancel it first."
-            )
+            await message.channel.send("⚠️  A draft is already open! Use `.canceldraft` first.")
             return
-        try:
-            n = int(args)
-            if n < 2 or n > 12:
-                raise ValueError
-        except ValueError:
-            await message.channel.send("❌  Usage: `.draft <2-12>`  (e.g. `.draft 6`)")
-            return
-
-        session = DraftSession(uid, uname, n, cid)
+        # Create a placeholder session — players are joined during .vote
+        session = DraftSession(uid, uname, 0, cid)
         drafts[cid] = session
         await message.channel.send(
-            f"🏛️  **Civ 6 Draft Lobby** opened by **{uname}**!\n"
-            f"👥  Waiting for **{n}** players.\n\n"
-            f"• `.join` — join the lobby\n"
-            f"• `.vote` — vote for a secret draft\n"
-            f"• `.ban <Leader Name>` — nominate a leader for a ban vote\n"
-            f"• `.startdraft` — host starts the draft\n"
+            f"🏛️  **Civ 6 Draft Lobby** opened by **{uname}**!\n\n"
+            f"• `.vote` — host: detect players from voice, open settings & ban votes\n"
+            f"• `.vote @skip` — same, but exclude tagged players\n"
+            f"• `.ban <Leader>` — nominate a leader for a ban\n"
+            f"• `.wban <Wonder>` — nominate a wonder for a ban\n"
+            f"• `.closevote` — host: tally all votes & finalize settings\n"
+            f"• `.startdraft` — host: run the leader draft\n"
         )
 
     # ── .join ──────────────────────────────────
     elif cmd == "join":
         if cid not in drafts:
-            await message.channel.send("❌  No draft lobby open. Use `.draft <n>` to start one.")
+            await message.channel.send("❌  No lobby open. Use `.draft <n>` to start one.")
             return
         session = drafts[cid]
         if session.started:
@@ -343,53 +439,168 @@ async def on_message(message):
             await message.channel.send(f"ℹ️  {uname} is already in the lobby.")
             return
         count = len(session.players)
-        await message.channel.send(
-            f"✅  **{uname}** joined! ({count}/{session.player_count} players)"
-        )
+        await message.channel.send(f"✅  **{uname}** joined! ({count}/{session.player_count})")
         if session.is_full():
             await message.channel.send(
-                f"🎉  Lobby full! **{session.host_name}**, type `.startdraft` to begin."
+                f"🎉  Lobby full! **{session.host_name}**, type `.vote` to open the settings vote."
             )
 
-    # ── .vote ──────────────────────────────────
+    # ── .vote [@exclude ...] ───────────────────
     elif cmd == "vote":
         if cid not in drafts:
-            await message.channel.send("❌  No draft lobby open.")
+            await message.channel.send("❌  No lobby open. Use `.draft` first.")
             return
         session = drafts[cid]
-        if uid not in session.players:
-            await message.channel.send("❌  You must join the lobby first (`.join`).")
+        if not session.is_host(uid):
+            await message.channel.send("❌  Only the host can open voting.")
+            return
+        if session.voting_open:
+            await message.channel.send("⚠️  Voting is already open!")
             return
         if session.started:
-            await message.channel.send("❌  Voting must happen before the draft starts.")
+            await message.channel.send("❌  The draft has already started.")
             return
-        session.secret_votes.add(uid)
-        yes = len(session.secret_votes)
-        needed = (len(session.players) // 2) + 1
+
+        # ── Step 1: detect & join players from voice channel ──
+        excluded_ids  = {m.id for m in message.mentions}
+        voice_members = []
+        host_member   = message.guild.get_member(uid) if message.guild else None
+        if host_member and host_member.voice and host_member.voice.channel:
+            vc = host_member.voice.channel
+            voice_members = [
+                m for m in vc.members
+                if not m.bot and m.id not in excluded_ids
+            ]
+
+        if voice_members:
+            if len(voice_members) < 2:
+                await message.channel.send(
+                    "❌  Need at least 2 non-excluded players in the voice channel."
+                )
+                return
+            # Reset and repopulate players from voice
+            session.players      = []
+            session.player_names = {}
+            for m in voice_members:
+                session.add_player(m.id, m.display_name)
+            session.player_count = len(session.players)
+
+            player_list = "\n".join(f"  • {session.player_names[p]}" for p in session.players)
+            excl_note   = (f"\n*(Excluded: {', '.join(m.mention for m in message.mentions)})*"
+                           if excluded_ids else "")
+            await message.channel.send(
+                f"🎙️  **{len(session.players)} players** detected from **{vc.name}**:{excl_note}\n"
+                f"{player_list}"
+            )
+        else:
+            # No voice channel — use whoever has .join'd already
+            if len(session.players) < 2:
+                await message.channel.send(
+                    "❌  Not in a voice channel and fewer than 2 players have joined.\n"
+                    "Have players use `.join`, or join a voice channel and retry `.vote`."
+                )
+                return
+            await message.channel.send(
+                f"👥  **{len(session.players)} players** in lobby — starting vote."
+            )
+
+        # ── Step 2: open settings vote ──
+        session.voting_open = True
         await message.channel.send(
-            f"🤫  **{uname}** voted for a **secret draft**. ({yes}/{needed} needed for majority)"
+            f"🗳️  **Settings Vote is now open!**\n"
+            f"React to each setting below. Most reactions wins.\n"
+            f"Use `.ban <Leader>` and `.wban <Wonder>` to nominate bans.\n"
+            f"Host types `.closevote` when everyone is done.\n"
+            f"─────────────────────────────────────"
+        )
+
+        for label, options in SETTINGS:
+            option_lines = "  ".join(f"{e} {o}" for e, o in options)
+            msg = await message.channel.send(f"**{label}**\n{option_lines}")
+            for emoji, _ in options:
+                try:
+                    await msg.add_reaction(emoji)
+                except Exception:
+                    pass
+            session.vote_messages[msg.id] = (label, options)
+
+        # Wonder ban list
+        chunk = "**🌟 Wonder Bans** — `.wban <Wonder Name>` to nominate:\n"
+        for w in sorted(ALL_WONDERS):
+            line = f"• {w}\n"
+            if len(chunk) + len(line) > 1900:
+                await message.channel.send(chunk)
+                chunk = ""
+            chunk += line
+        await message.channel.send(chunk)
+
+        # Civ ban section
+        await message.channel.send(
+            "**🚫 Civ Bans** — `.ban <Leader Name>` to nominate. Use `.leaders` for the full list."
+        )
+
+    # ── .closevote ─────────────────────────────
+    elif cmd == "closevote":
+        if cid not in drafts:
+            await message.channel.send("❌  No lobby open.")
+            return
+        session = drafts[cid]
+        if not session.is_host(uid):
+            await message.channel.send("❌  Only the host can close voting.")
+            return
+        if not session.voting_open:
+            await message.channel.send("❌  No vote is currently open.")
+            return
+
+        session.voting_open = False
+
+        for msg_id, (label, options) in session.vote_messages.items():
+            try:
+                fetched = await message.channel.fetch_message(msg_id)
+
+                # Tally reactions (subtract 1 for bot's own reaction)
+                counts = {}
+                for reaction in fetched.reactions:
+                    counts[str(reaction.emoji)] = max(0, reaction.count - 1)
+                winner = majority_winner(counts, options)
+
+                # Apply Draft Mode to session
+                if label == "🎲 Draft Mode":
+                    session.is_secret = (winner == "Secret")
+
+                session.vote_results[label] = winner
+
+                # Edit the message to show only the winner
+                await fetched.edit(content=f"**{label}**\n✅  **{winner}**")
+
+                # Clear all reactions
+                await fetched.clear_reactions()
+
+            except Exception:
+                pass  # silently skip if message was deleted or permissions missing
+
+        await message.channel.send(
+            f"✅  Voting closed. **{session.host_name}**, type `.startdraft` to run the leader draft!"
         )
 
     # ── .ban <leader> ──────────────────────────
     elif cmd == "ban":
         if cid not in drafts:
-            await message.channel.send("❌  No draft lobby open.")
+            await message.channel.send("❌  No lobby open.")
             return
         session = drafts[cid]
         if uid not in session.players:
-            await message.channel.send("❌  You must join the lobby first (`.join`).")
+            await message.channel.send("❌  You must join the lobby first.")
             return
         if session.started:
             await message.channel.send("❌  Bans must happen before the draft starts.")
             return
         if not args:
-            await message.channel.send("❌  Usage: `.ban <Leader Name>`  (e.g. `.ban Montezuma`)")
+            await message.channel.send("❌  Usage: `.ban <Leader Name>`")
             return
-        canonical = session.format_leader_key(args)
+        canonical = session.find_leader(args)
         if not canonical:
-            await message.channel.send(
-                f"❌  Leader **{args}** not found. Use `.leaders` to see all leaders."
-            )
+            await message.channel.send(f"❌  **{args}** not found. Use `.leaders` to see all leaders.")
             return
         if canonical in session.banned_leaders:
             await message.channel.send(f"ℹ️  **{canonical}** is already banned.")
@@ -399,22 +610,57 @@ async def on_message(message):
         session.ban_nominations[canonical].add(uid)
         votes  = len(session.ban_nominations[canonical])
         needed = max(2, (len(session.players) // 2) + 1)
-        if session.ban_vote_result(canonical):
+        if session.ban_vote_result(canonical, session.ban_nominations):
             session.banned_leaders.add(canonical)
             await message.channel.send(
-                f"🚫  **{canonical}** has been **banned** from the draft! "
-                f"({votes}/{needed} votes — majority reached)"
+                f"🚫  **{canonical}** has been **banned**! ({votes}/{needed} votes)"
             )
         else:
             await message.channel.send(
-                f"🗳️  **{uname}** nominated **{canonical}** for a ban. "
-                f"({votes}/{needed} votes needed)"
+                f"🗳️  **{uname}** nominated **{canonical}** for a ban. ({votes}/{needed} votes needed)"
+            )
+
+    # ── .wban <wonder> ─────────────────────────
+    elif cmd == "wban":
+        if cid not in drafts:
+            await message.channel.send("❌  No lobby open.")
+            return
+        session = drafts[cid]
+        if uid not in session.players:
+            await message.channel.send("❌  You must join the lobby first.")
+            return
+        if session.started:
+            await message.channel.send("❌  Bans must happen before the draft starts.")
+            return
+        if not args:
+            await message.channel.send("❌  Usage: `.wban <Wonder Name>`")
+            return
+        canonical = session.find_wonder(args)
+        if not canonical:
+            await message.channel.send(f"❌  **{args}** not found. Check the wonder list above.")
+            return
+        if canonical in session.banned_wonders:
+            await message.channel.send(f"ℹ️  **{canonical}** is already banned.")
+            return
+        if canonical not in session.wonder_nominations:
+            session.wonder_nominations[canonical] = set()
+        session.wonder_nominations[canonical].add(uid)
+        votes  = len(session.wonder_nominations[canonical])
+        needed = max(2, (len(session.players) // 2) + 1)
+        if session.ban_vote_result(canonical, session.wonder_nominations):
+            session.banned_wonders.add(canonical)
+            await message.channel.send(
+                f"🌟  **{canonical}** has been **banned**! ({votes}/{needed} votes)"
+            )
+        else:
+            await message.channel.send(
+                f"🗳️  **{uname}** nominated wonder **{canonical}** for a ban. ({votes}/{needed} needed)"
             )
 
     # ── .startdraft ────────────────────────────
     elif cmd == "startdraft":
         if cid not in drafts:
-            await message.channel.send("❌  No draft lobby open. Use `.draft <n>` first.")
+            await message.channel.send("❌  No lobby open. Use `.draft <n>` first.")
             return
         session = drafts[cid]
         if not session.is_host(uid):
@@ -430,12 +676,12 @@ async def on_message(message):
         session.run_draft()
         ban_list = (", ".join(f"**{b}**" for b in sorted(session.banned_leaders))
                     if session.banned_leaders else "none")
-        vote_summary = "🤫 Secret draft voted in!" if session.is_secret else "📢 Public draft"
+        vote_summary = "🤫 Secret draft!" if session.is_secret else "📢 Public draft"
         await message.channel.send(
-            f"🎲  **Draft starting!**\n"
+            f"🎲  **Leader Draft starting!**\n"
             f"{vote_summary}\n"
             f"🚫 Banned leaders: {ban_list}\n"
-            f"🃏 Each player receives **{len(list(session.assignments.values())[0])}** leaders.\n"
+            f"🃏 Each player receives **{len(list(session.assignments.values())[0])}** leaders to choose from.\n"
         )
 
         if session.is_secret:
@@ -445,26 +691,60 @@ async def on_message(message):
                 try:
                     user = await client.fetch_user(pid)
                     await user.send(
-                        f"🏛️  **Your Civ 6 Draft Leaders** (secret draft — don't share!):\n"
+                        f"🏛️  **Your Civ 6 Draft Leaders** (secret — don't share!):\n"
+                        f"Pick one of these {len(pleads)} leaders:\n\n"
                         f"{format_assignment(pleads)}"
                     )
                 except discord.Forbidden:
                     failed.append(session.player_names[pid])
             await message.channel.send(
                 "📬  Leaders sent to each player via DM!\n"
-                + (f"⚠️  Could not DM: {', '.join(failed)} — check DM settings." if failed else "")
+                + (f"⚠️  Could not DM: {', '.join(failed)}" if failed else "")
             )
         else:
-            result_lines = []
+            await message.channel.send("🏛️  **Draft Results** — each player picks one leader:\n\u200b")
             for pid in session.players:
                 pname  = session.player_names[pid]
                 pleads = session.assignments[pid]
-                result_lines.append(f"**{pname}**:\n{format_assignment(pleads)}")
-            await message.channel.send(
-                "🏛️  **Draft Results:**\n\n" + "\n\n".join(result_lines)
-            )
+                await message.channel.send(
+                    f"**{pname}** — pick one:\n{format_assignment(pleads)}"
+                )
 
         del drafts[cid]
+
+    # ── .trade @user ───────────────────────────
+    elif cmd == "trade":
+        if cid not in drafts:
+            await message.channel.send("❌  No active draft found.")
+            return
+        session = drafts[cid]
+        if uid not in session.assignments:
+            await message.channel.send("❌  You don't have a draft assignment yet.")
+            return
+        if not message.mentions:
+            await message.channel.send("❌  Usage: `.trade @PlayerName`")
+            return
+        target = message.mentions[0]
+        tid    = target.id
+        if tid == uid:
+            await message.channel.send("❌  You can't trade with yourself.")
+            return
+        if tid not in session.assignments:
+            await message.channel.send(f"❌  **{target.display_name}** doesn't have a draft assignment.")
+            return
+
+        sender_list   = format_assignment(session.assignments[uid])
+        receiver_list = format_assignment(session.assignments[tid])
+        offer_msg = await message.channel.send(
+            f"🔀  **Trade Offer!**\n"
+            f"**{uname}** wants to swap their entire list with **{target.display_name}**.\n\n"
+            f"**{uname}'s leaders:**\n{sender_list}\n\n"
+            f"**{target.display_name}'s leaders:**\n{receiver_list}\n\n"
+            f"{target.mention} — react ✅ to accept or ❌ to decline."
+        )
+        await offer_msg.add_reaction("✅")
+        await offer_msg.add_reaction("❌")
+        pending_trades[offer_msg.id] = TradeOffer(cid, uid, tid)
 
     # ── .canceldraft ───────────────────────────
     elif cmd == "canceldraft":
@@ -476,7 +756,7 @@ async def on_message(message):
             await message.channel.send("❌  Only the host can cancel the draft.")
             return
         del drafts[cid]
-        await message.channel.send("🗑️  Draft has been cancelled.")
+        await message.channel.send("🗑️  Draft cancelled.")
 
     # ── .leaders ───────────────────────────────
     elif cmd == "leaders":
@@ -487,15 +767,10 @@ async def on_message(message):
             prefix  = f"📋  **Available leaders** ({len(pool)} in pool, {len(session.banned_leaders)} banned):\n"
         else:
             prefix  = f"📋  **Full leader pool** ({len(pool)} leaders):\n"
-
         by_civ = defaultdict(list)
         for l, c in pool:
             by_civ[c].append(l)
-
-        lines = []
-        for civ in sorted(by_civ):
-            lines.append(f"**{civ}**: {', '.join(by_civ[civ])}")
-
+        lines = [f"**{civ}**: {', '.join(by_civ[civ])}" for civ in sorted(by_civ)]
         chunk = prefix
         for line in lines:
             if len(chunk) + len(line) + 1 > 1950:
@@ -509,15 +784,61 @@ async def on_message(message):
     elif cmd == "help":
         await message.channel.send(
             "**🏛️  Civ 6 Draft Bot — Commands**\n\n"
-            "`.draft <n>` — Open a lobby for *n* players\n"
+            "`.draft` — Open a lobby\n"
+            "`.vote` — Host: detect players from voice channel + open settings votes\n"
+            "`.vote @skip` — Same but exclude tagged players\n"
             "`.join` — Join the open lobby\n"
-            "`.vote` — Vote for a secret draft (leaders sent by DM)\n"
-            "`.ban <Leader Name>` — Nominate a leader to be banned (majority auto-bans)\n"
-            "`.startdraft` — Host: start the draft with current players\n"
-            "`.canceldraft` — Host: cancel the current draft\n"
+            "`.vote` — Host: post all settings votes and ban sections\n"
+            "`.ban <Leader>` — Nominate a leader to ban (majority auto-bans)\n"
+            "`.wban <Wonder>` — Nominate a natural wonder to ban\n"
+            "`.closevote` — Host: tally all votes and post final settings\n"
+            "`.startdraft` — Host: run the leader draft\n"
+            "`.trade @Player` — Offer to swap your full leader list\n"
+            "`.canceldraft` — Host: cancel the current session\n"
             "`.leaders` — Show all leaders in the current pool\n"
             "`.help` — Show this message\n"
         )
+
+
+# ─────────────────────────────────────────────
+# EVENT: on_reaction_add — trade responses
+# ─────────────────────────────────────────────
+@client.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+
+    msg_id = reaction.message.id
+    if msg_id not in pending_trades:
+        return
+
+    trade   = pending_trades[msg_id]
+    if user.id != trade.receiver_id:
+        return
+
+    channel = reaction.message.channel
+    session = drafts.get(trade.channel_id)
+
+    if str(reaction.emoji) == "✅":
+        if session and trade.sender_id in session.assignments and trade.receiver_id in session.assignments:
+            session.assignments[trade.sender_id], session.assignments[trade.receiver_id] = (
+                session.assignments[trade.receiver_id],
+                session.assignments[trade.sender_id]
+            )
+            sname = session.player_names.get(trade.sender_id, "Player")
+            rname = session.player_names.get(trade.receiver_id, "Player")
+            await channel.send(
+                f"✅  **Trade complete!** {sname} and {rname} swapped lists.\n\n"
+                f"**{sname}'s new leaders:**\n{format_assignment(session.assignments[trade.sender_id])}\n\n"
+                f"**{rname}'s new leaders:**\n{format_assignment(session.assignments[trade.receiver_id])}"
+            )
+        else:
+            await channel.send("❌  Trade failed — draft session no longer active.")
+    elif str(reaction.emoji) == "❌":
+        rname = session.player_names.get(trade.receiver_id, "Player") if session else "Player"
+        await channel.send(f"❌  **{rname}** declined the trade.")
+
+    del pending_trades[msg_id]
 
 
 # ─────────────────────────────────────────────
