@@ -40,6 +40,7 @@ FLOW:
 """
 
 import discord
+from website_sync import sync_match_report, sync_full_stats
 import random
 import os
 import asyncio
@@ -401,6 +402,11 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
         "channel_id":    str(channel_id)
     }
     save_json(REPORTS_FILE, reports)
+    # ── Sync to website ──
+    asyncio.get_event_loop().create_task(
+        sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats)
+    )
+
     return report_id
 
 
@@ -1197,6 +1203,17 @@ async def on_message(message):
             f"✅  Report `{report_id}` overridden. New report ID: `{new_id}`"
         )
 
+    # ── .sync ────────────────────────────────
+    elif cmd == "sync":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("❌ Admin only.")
+            return
+        await message.channel.send("🔄 Syncing all stats to website...")
+        success = await sync_full_stats(stats)
+        if success:
+            await message.channel.send("✅ Website synced!")
+        else:
+            await message.channel.send("❌ Sync failed. Check bot logs.")
     # ── .leaderboard ───────────────────────────
     elif cmd == "leaderboard":
         if not stats:
