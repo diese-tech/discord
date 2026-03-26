@@ -1240,7 +1240,51 @@ async def on_message(message):
             f"✅  Report `{report_id}` overridden and all ratings recalculated.\n"
             f"New report ID: `{new_id}`"
         )
-    # ── .sync ────────────────────────────────
+ # ── .resetseason ──────────────────────────
+    elif cmd == "resetseason":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("❌ Admin only.")
+            return
+
+        # Confirmation check
+        if args.lower() != "confirm":
+            player_count = len(stats)
+            report_count = len(reports)
+            await message.channel.send(
+                f"⚠️ **This will reset ALL ratings and match history.**\n"
+                f"• {player_count} players reset to 1500\n"
+                f"• {report_count} reports deleted\n\n"
+                f"Type `.resetseason confirm` to proceed."
+            )
+            return
+
+        # Reset all player ratings but keep their names
+        for uid_s in stats:
+            stats[uid_s]["rating"] = 1500.0
+            stats[uid_s]["rd"] = 350.0
+            stats[uid_s]["vol"] = 0.06
+            stats[uid_s]["games"] = 0
+            stats[uid_s]["wins"] = 0
+            stats[uid_s]["cc_wins"] = 0
+            stats[uid_s]["leaders"] = {}
+            if "drops" in stats[uid_s]:
+                stats[uid_s]["drops"] = 0
+
+        # Clear all reports
+        reports.clear()
+
+        save_json(STATS_FILE, stats)
+        save_json(REPORTS_FILE, reports)
+
+        # Sync to website
+        await sync_full_stats(stats)
+
+        await message.channel.send(
+            f"🔄 **Season reset complete!**\n"
+            f"All ratings reset to 1500. Match history cleared.\n"
+            f"Website synced."
+        )
+   # ── .sync ────────────────────────────────
     elif cmd == "sync":
         if not message.author.guild_permissions.administrator:
             await message.channel.send("❌ Admin only.")
