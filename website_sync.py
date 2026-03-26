@@ -1,15 +1,10 @@
 # website_sync.py
 # ─── WEBSITE SYNC MODULE ────────────────────────────────────────────────────
-# Add this file to the same directory as civ6_draft_bot.py
-# It pushes player stats and match results to the Vercel website API.
+# Pushes player stats, match results, and leader picks to the Vercel website.
 #
 # Setup:
-#   1. Add to Railway environment variables:
-#      WEBSITE_SYNC_URL=https://your-site.vercel.app/api/sync
-#      BOT_SYNC_SECRET=your-shared-secret-here
-#
-#   2. Add to Vercel environment variables:
-#      BOT_SYNC_SECRET=your-shared-secret-here  (same value)
+#   WEBSITE_SYNC_URL=https://your-site.vercel.app/api/sync
+#   BOT_SYNC_SECRET=your-shared-secret-here
 
 import os
 import json
@@ -20,30 +15,29 @@ SYNC_URL = os.environ.get("WEBSITE_SYNC_URL", "")
 SYNC_SECRET = os.environ.get("BOT_SYNC_SECRET", "")
 
 
-async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats):
+async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks=None):
     """
-    Call this after every process_report() to push the match to the website.
+    Push a match report to the website.
     
     Args:
-        report_id: The report ID string from process_report()
-        ordered_ids: List of Discord user IDs in placement order (1st to last)
+        report_id: The report ID string
+        ordered_ids: List of Discord user IDs in placement order
         ordered_names: List of display names in the same order
-        winner_id: Discord user ID of the winner (1st place)
-        is_cc: Whether this was a CC (concession) win
-        stats: The full stats dictionary from the bot
+        winner_id: Discord user ID of the winner
+        is_cc: Whether this was a CC win
+        stats: The full stats dictionary
+        leader_picks: Dict of {discord_id_str: {"leader": name, "civ": civ}} or None
     """
     if not SYNC_URL or not SYNC_SECRET:
         print("[WebSync] ⚠️ WEBSITE_SYNC_URL or BOT_SYNC_SECRET not set. Skipping sync.")
         return False
 
     try:
-        # Build player data for players in this match
         ordered_players = []
         for i, uid in enumerate(ordered_ids):
             uid_s = str(uid)
             p = stats.get(uid_s, {})
             
-            # Figure out most-played leader
             fav_civ = None
             if "leaders" in p and p["leaders"]:
                 max_games = 0
@@ -63,7 +57,6 @@ async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is
                 "favCiv": fav_civ,
             })
 
-        # Also send ALL player stats for a full picture
         all_players = {}
         for uid_s, p in stats.items():
             all_players[uid_s] = {
@@ -84,6 +77,7 @@ async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is
                 "winnerId": str(winner_id),
                 "isCC": is_cc,
                 "allPlayers": all_players,
+                "leaderPicks": leader_picks or {},
             }
         }
 
@@ -114,10 +108,7 @@ async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is
 
 
 async def sync_full_stats(stats):
-    """
-    Push ALL player stats to the website. Use for daily reconciliation
-    or manual .sync command.
-    """
+    """Push ALL player stats to the website."""
     if not SYNC_URL or not SYNC_SECRET:
         print("[WebSync] ⚠️ WEBSITE_SYNC_URL or BOT_SYNC_SECRET not set. Skipping sync.")
         return False
@@ -137,9 +128,7 @@ async def sync_full_stats(stats):
 
         payload = {
             "type": "full_sync",
-            "data": {
-                "players": all_players,
-            }
+            "data": { "players": all_players }
         }
 
         async with aiohttp.ClientSession() as session:
@@ -163,16 +152,14 @@ async def sync_full_stats(stats):
     except Exception as e:
         print(f"[WebSync] ❌ Full sync error: {e}")
         return False
+
+
 async def sync_announcement(title, content, is_pinned=False):
-    """
-    Push an announcement to the website.
-    Called from the .announce bot command.
-    """
+    """Push an announcement to the website."""
     if not SYNC_URL or not SYNC_SECRET:
-        print("[WebSync] ⚠️ WEBSITE_SYNC_URL or BOT_SYNC_SECRET not set. Skipping.")
+        print("[WebSync] ⚠️ Not configured. Skipping.")
         return False
 
-    # Build the announcements URL from the sync URL
     base_url = SYNC_URL.rsplit("/api/", 1)[0]
     announce_url = f"{base_url}/api/announcements"
 

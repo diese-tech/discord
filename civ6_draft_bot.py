@@ -41,6 +41,7 @@ FLOW:
 
 import discord
 from website_sync import sync_match_report, sync_full_stats, sync_announcement
+from leader_match import build_leader_index, match_leader, format_ambiguous
 import random
 import os
 import asyncio
@@ -256,6 +257,7 @@ ALL_LEADERS = [
     ("Bà Triệu",                           "Vietnam"),
     ("Shaka",                              "Zulu"),
 ]
+LEADER_INDEX = build_leader_index(ALL_LEADERS)
 
 # ─────────────────────────────────────────────
 # STATS STORAGE
@@ -402,10 +404,6 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
         "channel_id":    str(channel_id)
     }
     save_json(REPORTS_FILE, reports)
-    # ── Sync to website ──
-    asyncio.get_event_loop().create_task(
-        sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats)
-    )
 
     return report_id
 
@@ -1143,41 +1141,96 @@ async def on_message(message):
         if chunk:
             await message.channel.send(chunk)
 
-    # ── .report @1st @2nd @3rd ... ─────────────
+    # ── .report @1st [Leader] @2nd [Leader] ... ──
     elif cmd == "report":
         if len(message.mentions) < 2:
-            await message.channel.send("❌  Usage: `.report @1st @2nd @3rd ...` (tag all players in finishing order)")
+            await message.channel.send(
+                "❌  Usage: `.report @1st [Leader] @2nd [Leader] ...`\n"
+                "Tag players in finishing order. Leader names are optional.\n"
+                "Example: `.report @Alice Hammurabi @Bob Gorgo @Carol`"
+            )
             return
 
-        ordered_ids   = [m.id for m in message.mentions]
+        raw = message.content[len(PREFIX) + len("report"):].strip()
+        ordered_ids = [m.id for m in message.mentions]
         ordered_names = [m.display_name for m in message.mentions]
-        winner_id     = ordered_ids[0]
+        winner_id = ordered_ids[0]
 
-        # Check if winner used a CC
-        is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
+        leader_picks = {}
+        remaining = raw
+        parse_errors = []
+        for i, m in enumerate(message.mentions):
+            mention_str = m.mention
+            alt_str = f"<@!{m.id}>"
+            idx = remaining.find(mention_str)
+            if idx == -1:
+                idx = remaining.find(alt_str)
+                if idx != -1:
+                    mention_str = alt_str
+            if idx == -1:
+                continue
 
-        # Pull leader picks if available
-        session = drafts.get(cid)
-        if session:
-            for pid in ordered_ids:
-                uid_s = str(pid)
-                pick  = session.secret_picks.get(pid) or next(
-                    (session.assignments.get(pid, [None])[0],), None)
-                if pick and isinstance(pick, tuple):
-                    leader_name = pick[0]
-                    p = get_player(pid, session.player_names.get(pid, str(pid)))
+            remaining = remaining[idx + len(mention_str):].strip()
+
+            next_mention_idx = len(remaining)
+            for nm in message.mentions[i+1:]:
+                ni = remaining.find(nm.mention)
+                ni2 = remaining.find(f"<@!{nm.id}>")
+                if ni != -1:
+                    next_mention_idx = min(next_mention_idx, ni)
+                if ni2 != -1:
+                    next_mention_idx = min(next_mention_idx, ni2)
+
+            leader_text = remaining[:next_mention_idx].strip()
+
+            if leader_text:
+                result_type, result_data = match_leader(leader_text, LEADER_INDEX)
+                if result_type == "exact":
+                    leader_name, civ_name = result_data
+                    leader_picks[str(m.id)] = {"leader": leader_name, "civ": civ_name}
+                    p = get_player(m.id, m.display_name)
                     if leader_name not in p["leaders"]:
                         p["leaders"][leader_name] = {"games": 0, "wins": 0}
                     p["leaders"][leader_name]["games"] += 1
-                    if pid == winner_id:
+                    if m.id == winner_id:
                         p["leaders"][leader_name]["wins"] += 1
+                elif result_type == "ambiguous":
+                    parse_errors.append(
+                        f"⚠️ **\"{leader_text}\"** is ambiguous for {m.display_name}. Did you mean:\n"
+                        + format_ambiguous(result_data)
+                    )
+                else:
+                    parse_errors.append(
+                        f"⚠️ **\"{leader_text}\"** not found for {m.display_name}. Use `.leaders` to check."
+                    )
+
+        if parse_errors:
+            await message.channel.send("\n".join(parse_errors) + "\n\n⚠️ Match recorded without those leaders.")
+
+        if leader_picks:
             save_json(STATS_FILE, stats)
 
+        is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
         report_id = process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
-        winner_name = message.mentions[0].display_name
-        await message.channel.send(
-            f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`"
+
+        asyncio.get_event_loop().create_task(
+            sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks)
         )
+
+        winner_name = message.mentions[0].display_name
+        reply = f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`"
+        if leader_picks:
+            pick_lines = []
+            for pid in ordered_ids:
+                pid_s = str(pid)
+                pname = ordered_names[ordered_ids.index(pid)]
+                if pid_s in leader_picks:
+                    lp = leader_picks[pid_s]
+                    pick_lines.append(f"  • {pname} — **{lp['leader']}** ({lp['civ']})")
+                else:
+                    pick_lines.append(f"  • {pname}")
+            reply += "\n\n🏛️ **Leaders:**\n" + "\n".join(pick_lines)
+        await message.channel.send(reply)
 
 # ── .override <report_id> @1st @2nd ... ────
     elif cmd == "override":
