@@ -40,7 +40,7 @@ FLOW:
 """
 
 import discord
-from website_sync import sync_match_report, sync_full_stats
+from website_sync import sync_match_report, sync_full_stats, sync_announcement
 import random
 import os
 import asyncio
@@ -1284,6 +1284,40 @@ async def on_message(message):
             f"All ratings reset to 1500. Match history cleared.\n"
             f"Website synced."
         )
+   # ── .announce <title> | <message> ─────────
+    elif cmd == "announce":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("❌ Admin only.")
+            return
+        if "|" not in args:
+            await message.channel.send("❌ Usage: `.announce Title Here | Your announcement message here`")
+            return
+
+        title, content = args.split("|", 1)
+        title = title.strip()
+        content = content.strip()
+
+        if not title or not content:
+            await message.channel.send("❌ Both title and message are required.\nUsage: `.announce Title | Message`")
+            return
+
+        # Check for pin flag
+        is_pinned = False
+        if content.endswith("--pin"):
+            is_pinned = True
+            content = content[:-5].strip()
+
+        # Post to Discord channel
+        await message.channel.send(
+            f"📢 **{title}**\n\n{content}"
+        )
+
+        # Push to website
+        success = await sync_announcement(title, content, is_pinned)
+        if success:
+            await message.channel.send("✅ Announcement posted to website.")
+        else:
+            await message.channel.send("⚠️ Posted in Discord but website sync failed.")
    # ── .sync ────────────────────────────────
     elif cmd == "sync":
         if not message.author.guild_permissions.administrator:

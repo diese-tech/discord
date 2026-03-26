@@ -163,3 +163,37 @@ async def sync_full_stats(stats):
     except Exception as e:
         print(f"[WebSync] ❌ Full sync error: {e}")
         return False
+async def sync_announcement(title, content, is_pinned=False):
+    """
+    Push an announcement to the website.
+    Called from the .announce bot command.
+    """
+    if not SYNC_URL or not SYNC_SECRET:
+        print("[WebSync] ⚠️ WEBSITE_SYNC_URL or BOT_SYNC_SECRET not set. Skipping.")
+        return False
+
+    # Build the announcements URL from the sync URL
+    base_url = SYNC_URL.rsplit("/api/", 1)[0]
+    announce_url = f"{base_url}/api/announcements"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                announce_url,
+                json={"title": title, "content": content, "isPinned": is_pinned},
+                headers={
+                    "Authorization": f"Bearer {SYNC_SECRET}",
+                    "Content-Type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    print(f"[WebSync] ✅ Announcement posted: {title}")
+                    return True
+                else:
+                    result = await resp.json()
+                    print(f"[WebSync] ❌ Announcement failed ({resp.status}): {result}")
+                    return False
+    except Exception as e:
+        print(f"[WebSync] ❌ Announcement error: {e}")
+        return False
