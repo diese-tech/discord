@@ -1179,8 +1179,11 @@ async def on_message(message):
             f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`"
         )
 
-    # ── .override <report_id> @1st @2nd ... ────
+# ── .override <report_id> @1st @2nd ... ────
     elif cmd == "override":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("❌ Admin only.")
+            return
         parts2 = args.split()
         if not parts2 or not message.mentions:
             await message.channel.send("❌  Usage: `.override <report_id> @1st @2nd @3rd ...`")
@@ -1190,19 +1193,53 @@ async def on_message(message):
             await message.channel.send(f"❌  Report ID `{report_id}` not found.")
             return
 
+        # Delete the bad report
+        del reports[report_id]
+        save_json(REPORTS_FILE, reports)
+
+        # Reset all player ratings and replay every remaining report
+        for uid_s in stats:
+            stats[uid_s]["rating"] = 1500.0
+            stats[uid_s]["rd"] = 350.0
+            stats[uid_s]["vol"] = 0.06
+            stats[uid_s]["games"] = 0
+            stats[uid_s]["wins"] = 0
+            stats[uid_s]["cc_wins"] = 0
+
+        sorted_reports = sorted(reports.values(), key=lambda r: r.get("channel_id", ""))
+        for r in sorted_reports:
+            r_ids = [int(x) for x in r["ordered_ids"]]
+            r_names = r["ordered_names"]
+            r_data = [get_player(uid, r_names[i]) for i, uid in enumerate(r_ids)]
+            for i, uid in enumerate(r_ids):
+                p = r_data[i]
+                opps = []
+                for j, opp_uid in enumerate(r_ids):
+                    if i == j:
+                        continue
+                    score = 1.0 if i < j else 0.0
+                    opps.append((r_data[j], score))
+                glicko2_update(p, opps)
+            for i, uid in enumerate(r_ids):
+                uid_s = str(uid)
+                stats[uid_s]["games"] += 1
+                if i == 0:
+                    stats[uid_s]["wins"] += 1
+                    if r.get("is_cc"):
+                        stats[uid_s]["cc_wins"] += 1
+
+        save_json(STATS_FILE, stats)
+
+        # Now record the corrected result
         ordered_ids   = [m.id for m in message.mentions]
         ordered_names = [m.display_name for m in message.mentions]
         winner_id     = ordered_ids[0]
 
-        # Remove old report stats (best effort — recalculate from scratch not supported)
-        del reports[report_id]
-        save_json(REPORTS_FILE, reports)
-
         new_id = process_report(ordered_ids, ordered_names, winner_id, False, cid)
         await message.channel.send(
-            f"✅  Report `{report_id}` overridden. New report ID: `{new_id}`"
+            f"✅  Report `{report_id}` overridden and all ratings recalculated.\n"
+            f"New report ID: `{new_id}`"
         )
-
     # ── .sync ────────────────────────────────
     elif cmd == "sync":
         if not message.author.guild_permissions.administrator:
