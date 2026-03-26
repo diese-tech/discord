@@ -291,7 +291,7 @@ def get_player(uid, name):
     uid = str(uid)
     if uid not in stats:
         stats[uid] = {**GLICKO_START, "name": name,
-                      "games": 0, "wins": 0, "cc_wins": 0, "leaders": {}}
+                      "games": 0, "wins": 0, "first_place": 0, "cc_wins": 0, "leaders": {}}
     else:
         stats[uid]["name"] = name  # keep name fresh
     return stats[uid]
@@ -372,6 +372,12 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
     n = len(ordered_ids)
     players_data = [get_player(uid, ordered_names[i]) for i, uid in enumerate(ordered_ids)]
 
+    # Capture ratings before Glicko update
+    ratings_before = {}
+    for uid in ordered_ids:
+        uid_s = str(uid)
+        ratings_before[uid_s] = stats[uid_s]["rating"]
+
     # Build pairwise matchups for each player
     for i, uid in enumerate(ordered_ids):
         p = players_data[i]
@@ -387,10 +393,20 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
     for i, uid in enumerate(ordered_ids):
         uid_s = str(uid)
         stats[uid_s]["games"] += 1
+
+        # First place tracking (separate from wins)
         if i == 0:
-            stats[uid_s]["wins"] += 1
+            if "first_place" not in stats[uid_s]:
+                stats[uid_s]["first_place"] = 0
+            stats[uid_s]["first_place"] += 1
             if is_cc:
                 stats[uid_s]["cc_wins"] += 1
+
+        # Win = positive or neutral rating gain
+        before = ratings_before.get(uid_s, 1500)
+        after = stats[uid_s]["rating"]
+        if after >= before:
+            stats[uid_s]["wins"] += 1
 
     save_json(STATS_FILE, stats)
 
@@ -1423,10 +1439,10 @@ async def on_message(message):
                         best_wr = lwr
                         best_leader = f"{lname} ({round(lwr*100)}%)"
 
+            first_place = p.get("first_place", 0)
             lines.append(
                 f"{medal} **{name}** — {rating} ±{rd}\n"
-                f"  GP: {games}  W: {wins}  CC: {cc_wins}  WR: {wr}\n"
-                f"  Most played: {most_played_leader}  |  Best WR: {best_leader}"
+                f"  GP: {games}  W: {wins}  1st: {first_place}  CC: {cc_wins}  WR: {wr}\n"
             )
 
         # Split into chunks if needed
