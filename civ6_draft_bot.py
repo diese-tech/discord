@@ -1362,7 +1362,9 @@ async def on_message(message):
         is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
         report_id = await process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
 
-        # Sync happens when admin reacts 👍 in #reports channel
+        asyncio.get_event_loop().create_task(
+            sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks)
+        )
 
         winner_name = ordered_members[0].display_name
         placement_lines = "\n".join(
