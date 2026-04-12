@@ -111,6 +111,7 @@ SETTINGS = [
         ("⬆️", "High"),
     ]),
     ("🌋 Disasters", [
+        ("0️⃣", "0"),
         ("1️⃣", "1"),
         ("2️⃣", "2"),
         ("3️⃣", "3"),
@@ -824,16 +825,6 @@ async def on_message(message):
                 except Exception:
                     pass
             session.vote_messages[msg.id] = (label, options)
-
-        # Wonder ban list
-        chunk = "**🌟 Wonder Bans** — `.wban <Wonder Name>` to nominate:\n"
-        for w in sorted(ALL_WONDERS):
-            line = f"• {w}\n"
-            if len(chunk) + len(line) > 1900:
-                await message.channel.send(chunk)
-                chunk = ""
-            chunk += line
-        await message.channel.send(chunk)
 
         # Civ ban section
         await message.channel.send(
