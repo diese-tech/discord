@@ -1308,7 +1308,7 @@ async def on_message(message):
         leader_picks = {}
         remaining = raw
         parse_errors = []
-        for i, m in enumerate(message.mentions):
+        for i, m in enumerate(ordered_members):
             mention_str = m.mention
             alt_str = f"<@!{m.id}>"
             idx = remaining.find(mention_str)
