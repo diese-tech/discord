@@ -54,6 +54,7 @@ from collections import defaultdict
 # CONFIG
 # ─────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "")
+REPORTS_CHANNEL_ID = int(os.environ.get("REPORTS_CHANNEL_ID", "1487172746386345995"))
 PREFIX = "."
 
 if not BOT_TOKEN:
@@ -418,7 +419,8 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
         "ordered_names": ordered_names,
         "winner_id":     str(winner_id),
         "is_cc":         is_cc,
-        "channel_id":    str(channel_id)
+        "channel_id":    str(channel_id),
+        "discord_msg_id": None
     }
     save_json(REPORTS_FILE, reports)
 
@@ -1303,6 +1305,19 @@ async def on_message(message):
             reply += "\n\n🏛️ **Leaders:**\n" + "\n".join(pick_lines)
         await message.channel.send(reply)
 
+        # Post to #reports channel
+        reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
+        if reports_channel:
+            placement_text = "\n".join(
+                f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {ordered_names[i]}"
+                for i in range(len(ordered_names))
+            )
+            report_msg = await reports_channel.send(
+                f"📋  **Match Report** — ID: `{report_id}`\n{placement_text}"
+            )
+            reports[report_id]["discord_msg_id"] = report_msg.id
+            save_json(REPORTS_FILE, reports)
+
 # ── .override <report_id> @1st @2nd ... ────
     elif cmd == "override":
         if not message.author.guild_permissions.administrator:
@@ -1364,6 +1379,25 @@ async def on_message(message):
         winner_id     = ordered_ids[0]
 
         new_id = process_report(ordered_ids, ordered_names, winner_id, False, cid)
+
+        # Edit the original report message in #reports channel
+        reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
+        old_msg_id = reports.get(report_id, {}).get("discord_msg_id") if report_id in reports else None
+        if reports_channel and old_msg_id:
+            try:
+                old_msg = await reports_channel.fetch_message(old_msg_id)
+                new_placement = "\n".join(
+                    f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {ordered_names[i]}"
+                    for i in range(len(ordered_names))
+                )
+                await old_msg.edit(content=
+                    f"📋  **Match Report** — ID: `{new_id}` *(corrected from `{report_id}`)*\n{new_placement}"
+                )
+                reports[new_id]["discord_msg_id"] = old_msg_id
+                save_json(REPORTS_FILE, reports)
+            except Exception:
+                pass
+
         await message.channel.send(
             f"✅  Report `{report_id}` overridden and all ratings recalculated.\n"
             f"New report ID: `{new_id}`"
