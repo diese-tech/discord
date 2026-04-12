@@ -59,6 +59,8 @@ db_pool = None
 # ─────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 REPORTS_CHANNEL_ID = int(os.environ.get("REPORTS_CHANNEL_ID", "1487172746386345995"))
+SYNC_URL = os.environ.get("WEBSITE_SYNC_URL", "")
+SYNC_SECRET = os.environ.get("BOT_SYNC_SECRET", "")
 PREFIX = "."
 
 if not BOT_TOKEN:
@@ -1528,8 +1530,16 @@ async def on_message(message):
 
         await db_save_all_stats()
 
-        # Sync to website
-        await sync_full_stats(stats)
+        # Sync reset to website
+        if SYNC_URL and SYNC_SECRET:
+            import aiohttp
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    SYNC_URL,
+                    json={"type": "season_reset", "data": {}},
+                    headers={"Authorization": f"Bearer {SYNC_SECRET}", "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
 
         await message.channel.send(
             f"🔄 **Season reset complete!**\n"
