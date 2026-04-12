@@ -1386,6 +1386,7 @@ async def on_message(message):
             report_msg = await reports_channel.send(
                 f"📋  **Match Report** — ID: `{report_id}`\n{placement_text}"
             )
+            await report_msg.add_reaction("👍")
             reports[report_id]["discord_msg_id"] = report_msg.id
             await db_save_report(report_id, reports[report_id])
 
