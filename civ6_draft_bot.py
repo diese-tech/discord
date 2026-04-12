@@ -424,7 +424,8 @@ async def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_i
         "winner_id":     str(winner_id),
         "is_cc":         is_cc,
         "channel_id":    str(channel_id),
-        "discord_msg_id": None
+        "discord_msg_id": None,
+        "leader_picks":  {}
     }
     await db_save_report(report_id, reports[report_id])
 
@@ -1349,9 +1350,7 @@ async def on_message(message):
         is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
         report_id = await process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
 
-        asyncio.get_event_loop().create_task(
-            sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks)
-        )
+        # Sync happens when admin reacts 👍 in #reports channel
 
         winner_name = ordered_members[0].display_name
         placement_lines = "\n".join(
@@ -1371,6 +1370,11 @@ async def on_message(message):
                     pick_lines.append(f"  • {pname}")
             reply += "\n\n🏛️ **Leaders:**\n" + "\n".join(pick_lines)
         await message.channel.send(reply)
+
+        # Store leader picks in report
+        if leader_picks:
+            reports[report_id]["leader_picks"] = leader_picks
+            await db_save_report(report_id, reports[report_id])
 
         # Post to #reports channel
         reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
@@ -2138,6 +2142,29 @@ async def on_reaction_add(reaction, user):
                     # Everyone is ready — auto-close the vote
                     await close_vote(session, channel)
             return
+
+    # ── #reports approval handler ──
+    if msg_id in [r.get("discord_msg_id") for r in reports.values()]:
+        if str(reaction.emoji) == "👍":
+            member = reaction.message.guild.get_member(user.id)
+            if not member or not member.guild_permissions.administrator:
+                return
+            # Find the report for this message
+            report_id = next((rid for rid, r in reports.items() if r.get("discord_msg_id") == msg_id), None)
+            if not report_id:
+                return
+            r = reports[report_id]
+            ordered_ids   = [int(x) for x in r["ordered_ids"]]
+            ordered_names = r["ordered_names"]
+            winner_id     = int(r["winner_id"])
+            is_cc         = r.get("is_cc", False)
+            leader_picks  = r.get("leader_picks", {})
+            success = await sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks)
+            if success:
+                await reaction.message.edit(content=reaction.message.content + "\n✅ Synced to site")
+            else:
+                await reaction.message.edit(content=reaction.message.content + "\n❌ Sync failed")
+        return
 
     # ── DM vote reaction handler (cc/irrel/scrap/remap) ──
     in_secret_draft = any(msg_id in s.secret_dm_msgs for s in drafts.values())
