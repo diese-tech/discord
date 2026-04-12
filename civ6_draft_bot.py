@@ -644,6 +644,63 @@ async def run_draft_for_session(session, channel):
 
 
 # ─────────────────────────────────────────────
+# HELPER: early close for DM votes (cc/irrel/scrap/remap)
+# ─────────────────────────────────────────────
+async def try_early_close(vote_id, dm_msg_ids, voter_ids, notice, kind, target_name, needed=None, turn=None, session=None):
+    """Cancel the timer and close the vote early if all players have voted."""
+    if vote_id not in active_timed_votes:
+        return
+    all_voted = all(
+        timed_vote_dm_data.get(dm_id, {}).get("voted", False)
+        for dm_id in dm_msg_ids.values()
+    )
+    if not all_voted:
+        return
+
+    # Cancel the running timer
+    active_timed_votes[vote_id].cancel()
+    del active_timed_votes[vote_id]
+
+    yay = nay = 0
+    for pid, dm_id in dm_msg_ids.items():
+        try:
+            voter = await client.fetch_user(pid)
+            dm_channel = voter.dm_channel or await voter.create_dm()
+            dm_msg = await dm_channel.fetch_message(dm_id)
+            for r in dm_msg.reactions:
+                if str(r.emoji) == "👍":
+                    async for u in r.users():
+                        if u.id == pid: yay += 1
+                if str(r.emoji) == "👎":
+                    async for u in r.users():
+                        if u.id == pid: nay += 1
+            await dm_msg.edit(content="✅  This vote has closed early — all players voted!")
+            await dm_msg.clear_reactions()
+            timed_vote_dm_data.pop(dm_id, None)
+        except Exception:
+            pass
+
+    if kind == "cc":
+        result_str = f"🏆  **CC Vote — CLOSED (early)** — concede to **{target_name}**?\n👍 Yay: **{yay}**   👎 Nay: **{nay}**"
+    elif kind == "irrel":
+        result_str = f"⚪  **Irrel Vote — CLOSED (early)** — is **{target_name}** irrelevant?\n👍 Yay: **{yay}**   👎 Nay: **{nay}**"
+    elif kind == "scrap":
+        passed = needed and yay >= needed
+        result = "✅  **SCRAP PASSED**" if passed else "❌  **Scrap failed**"
+        result_str = f"🗑️  **Scrap Vote — CLOSED (early)** (Turn {turn})\n{result} — 👍 Yes: **{yay}**   👎 No: **{nay}**"
+    elif kind == "remap":
+        passed = yay == len(voter_ids) and nay == 0
+        result = "✅  **REMAP PASSED** — relobby the game!" if passed else "❌  **Remap denied**"
+        result_str = f"🗺️  **Remap Vote — CLOSED (early)** (Turn {turn})\n{result} — 👍 Agree: **{yay}**   👎 Deny: **{nay}**"
+    else:
+        result_str = f"Vote closed early. 👍 {yay}  👎 {nay}"
+
+    try:
+        await notice.edit(content=result_str)
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────
 # HELPER: tally votes, edit messages, run draft
 # ─────────────────────────────────────────────
 async def close_vote(session, channel):
@@ -1898,6 +1955,30 @@ async def on_reaction_add(reaction, user):
                     # Everyone is ready — auto-close the vote
                     await close_vote(session, channel)
             return
+
+    # ── DM vote reaction handler (cc/irrel/scrap/remap) ──
+    in_secret_draft = any(msg_id in s.secret_dm_msgs for s in drafts.values())
+    if msg_id in timed_vote_dm_data and not in_secret_draft:
+        entry = timed_vote_dm_data[msg_id]
+        if user.id == entry["user_id"] and str(reaction.emoji) in ("👍", "👎"):
+            entry["voted"] = True
+            vote_id   = entry["vote_id"]
+            kind      = entry["kind"]
+            # Find all dm_msg_ids for this vote by scanning timed_vote_dm_data
+            dm_msg_ids = {
+                e["user_id"]: mid
+                for mid, e in timed_vote_dm_data.items()
+                if e["vote_id"] == vote_id
+            }
+            voter_ids = list(dm_msg_ids.keys())
+            # Fetch the notice message to pass to early close
+            try:
+                guild_channel = client.get_channel(entry["channel_id"])
+                notice = await guild_channel.fetch_message(vote_id)
+                await try_early_close(vote_id, dm_msg_ids, voter_ids, notice, kind, "", session=None)
+            except Exception:
+                pass
+        return
 
     # ── Trade offer handler ──
     if msg_id not in pending_trades:
