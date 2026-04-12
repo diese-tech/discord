@@ -49,6 +49,10 @@ import json
 import uuid
 from pathlib import Path
 from collections import defaultdict
+import asyncpg
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+db_pool = None
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -410,7 +414,7 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
         if after >= before:
             stats[uid_s]["wins"] += 1
 
-    save_json(STATS_FILE, stats)
+    await db_save_all_stats()
 
     # Store report
     report_id = str(uuid.uuid4())[:8].upper()
@@ -422,7 +426,7 @@ def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
         "channel_id":    str(channel_id),
         "discord_msg_id": None
     }
-    save_json(REPORTS_FILE, reports)
+    await db_save_report(report_id, reports[report_id])
 
     return report_id
 
@@ -743,10 +747,86 @@ async def close_vote(session, channel):
 
 
 
+async def init_db():
+    global db_pool
+    if not DATABASE_URL:
+        print("[DB] ⚠️  No DATABASE_URL set. Using local JSON fallback.")
+        return
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_stats (
+                user_id TEXT PRIMARY KEY,
+                data JSONB NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_reports (
+                report_id TEXT PRIMARY KEY,
+                data JSONB NOT NULL
+            )
+        """)
+    print("[DB] ✅  Connected to Neon database.")
+
+async def db_load_stats():
+    if not db_pool:
+        return load_json(STATS_FILE, {})
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, data FROM bot_stats")
+        return {row["user_id"]: dict(row["data"]) for row in rows}
+
+async def db_save_player(uid_s, player_data):
+    if not db_pool:
+        save_json(STATS_FILE, stats)
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bot_stats (user_id, data) VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET data = $2
+        """, uid_s, json.dumps(player_data))
+
+async def db_save_all_stats():
+    if not db_pool:
+        save_json(STATS_FILE, stats)
+        return
+    async with db_pool.acquire() as conn:
+        for uid_s, player_data in stats.items():
+            await conn.execute("""
+                INSERT INTO bot_stats (user_id, data) VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE SET data = $2
+            """, uid_s, json.dumps(player_data))
+
+async def db_load_reports():
+    if not db_pool:
+        return load_json(REPORTS_FILE, {})
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT report_id, data FROM bot_reports")
+        return {row["report_id"]: dict(row["data"]) for row in rows}
+
+async def db_save_report(report_id, report_data):
+    if not db_pool:
+        save_json(REPORTS_FILE, reports)
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bot_reports (report_id, data) VALUES ($1, $2)
+            ON CONFLICT (report_id) DO UPDATE SET data = $2
+        """, report_id, json.dumps(report_data))
+
+async def db_delete_report(report_id):
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM bot_reports WHERE report_id = $1", report_id)
+
 @client.event
 async def on_ready():
+    global stats, reports
     print(f"✅  Logged in as {client.user} (ID: {client.user.id})")
     print(f"    Leader pool: {len(ALL_LEADERS)} leaders | {len(ALL_WONDERS)} wonders")
+    await init_db()
+    stats   = await db_load_stats()
+    reports = await db_load_reports()
     print("    Ready to draft!")
 
 
@@ -1277,7 +1357,7 @@ async def on_message(message):
             await message.channel.send("\n".join(parse_errors) + "\n\n⚠️ Match recorded without those leaders.")
 
         if leader_picks:
-            save_json(STATS_FILE, stats)
+            await db_save_all_stats()
 
         is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
         report_id = process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
@@ -1316,7 +1396,7 @@ async def on_message(message):
                 f"📋  **Match Report** — ID: `{report_id}`\n{placement_text}"
             )
             reports[report_id]["discord_msg_id"] = report_msg.id
-            save_json(REPORTS_FILE, reports)
+            await db_save_report(report_id, reports[report_id])
 
 # ── .override <report_id> @1st @2nd ... ────
     elif cmd == "override":
@@ -1333,8 +1413,9 @@ async def on_message(message):
             return
 
         # Delete the bad report
+        old_discord_msg_id = reports[report_id].get("discord_msg_id")
         del reports[report_id]
-        save_json(REPORTS_FILE, reports)
+        await db_delete_report(report_id)
 
         # Reset all player ratings and replay every remaining report
         for uid_s in stats:
@@ -1367,7 +1448,7 @@ async def on_message(message):
                     if r.get("is_cc"):
                         stats[uid_s]["cc_wins"] += 1
 
-        save_json(STATS_FILE, stats)
+        await db_save_all_stats()
 
         # Now record the corrected result
         raw2 = message.content[len(PREFIX) + len("override"):].strip()
@@ -1434,9 +1515,12 @@ async def on_message(message):
 
         # Clear all reports
         reports.clear()
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM bot_reports")
+                await conn.execute("DELETE FROM bot_stats")
 
-        save_json(STATS_FILE, stats)
-        save_json(REPORTS_FILE, reports)
+        await db_save_all_stats()
 
         # Sync to website
         await sync_full_stats(stats)
@@ -1758,7 +1842,7 @@ async def on_message(message):
             stats[tid]["drops"] = 0
         stats[tid]["drops"] += 1
         n_drops = stats[tid]["drops"]
-        save_json(STATS_FILE, stats)
+        await db_save_player(tid, stats[tid])
 
         # Remove from active session if present
         session = drafts.get(cid)
@@ -1806,7 +1890,7 @@ async def on_message(message):
         if old_id in stats:
             # Ensure new player has a record
             get_player(new_player.id, new_player.display_name)
-        save_json(STATS_FILE, stats)
+        await db_save_all_stats()
 
         await message.channel.send(
             f"🔄  **Sub recorded** — **{old_player.display_name}** has been replaced by **{new_player.display_name}**.\nNote: The subbed-out player must wait **60 minutes** before joining a new game."
