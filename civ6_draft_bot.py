@@ -802,7 +802,13 @@ async def db_load_reports():
         return load_json(REPORTS_FILE, {})
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT report_id, data FROM bot_reports")
-        return {row["report_id"]: dict(row["data"]) for row in rows}
+        result = {}
+        for row in rows:
+            data = row["data"]
+            if isinstance(data, str):
+                data = json.loads(data)
+            result[row["report_id"]] = dict(data)
+        return result
 
 async def db_save_report(report_id, report_data):
     if not db_pool:
