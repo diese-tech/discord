@@ -1306,31 +1306,18 @@ async def on_message(message):
         winner_id = ordered_ids[0]
 
         leader_picks = {}
-        remaining = raw
         parse_errors = []
-        for i, m in enumerate(ordered_members):
-            mention_str = m.mention
-            alt_str = f"<@!{m.id}>"
-            idx = remaining.find(mention_str)
-            if idx == -1:
-                idx = remaining.find(alt_str)
-                if idx != -1:
-                    mention_str = alt_str
-            if idx == -1:
+        chunks = [c.strip() for c in raw.split(";")]
+        for chunk in chunks:
+            # Find the mention in this chunk
+            chunk_ids = [int(uid) for uid in __import__('re').findall(r'<@!?(\d+)>', chunk)]
+            if not chunk_ids:
                 continue
-
-            remaining = remaining[idx + len(mention_str):].strip()
-
-            next_mention_idx = len(remaining)
-            for nm in message.mentions[i+1:]:
-                ni = remaining.find(nm.mention)
-                ni2 = remaining.find(f"<@!{nm.id}>")
-                if ni != -1:
-                    next_mention_idx = min(next_mention_idx, ni)
-                if ni2 != -1:
-                    next_mention_idx = min(next_mention_idx, ni2)
-
-            leader_text = remaining[:next_mention_idx].strip()
+            m = mention_lookup.get(chunk_ids[0])
+            if not m:
+                continue
+            # Strip the mention out to get the leader text
+            leader_text = __import__('re').sub(r'<@!?\d+>', '', chunk).strip()
 
             if leader_text:
                 result_type, result_data = match_leader(leader_text, LEADER_INDEX)
