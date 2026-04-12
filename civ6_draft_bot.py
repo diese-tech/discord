@@ -370,7 +370,7 @@ def glicko2_update(player, opponents):
     player["rd"]     = max(new_phi * GLICKO_Q, 30.0)
     player["vol"]    = new_sig
 
-def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
+async def process_report(ordered_ids, ordered_names, winner_id, is_cc, channel_id):
     """
     ordered_ids: list of user IDs from 1st to last place
     Treat as pairwise: higher placement beats lower placement.
@@ -1360,7 +1360,7 @@ async def on_message(message):
             await db_save_all_stats()
 
         is_cc = cid in drafts and hasattr(drafts.get(cid), 'players')
-        report_id = process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
+        report_id = await process_report(ordered_ids, ordered_names, winner_id, is_cc, cid)
 
         asyncio.get_event_loop().create_task(
             sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks)
