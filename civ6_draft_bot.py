@@ -1168,8 +1168,11 @@ async def on_message(message):
             return
 
         raw = message.content[len(PREFIX) + len("report"):].strip()
-        ordered_ids = [m.id for m in message.mentions]
-        ordered_names = [m.display_name for m in message.mentions]
+        raw_ordered_ids = [int(uid) for uid in __import__('re').findall(r'<@!?(\d+)>', raw)]
+        mention_lookup  = {m.id: m for m in message.mentions}
+        ordered_members = [mention_lookup[uid] for uid in raw_ordered_ids if uid in mention_lookup]
+        ordered_ids   = [m.id for m in ordered_members]
+        ordered_names = [m.display_name for m in ordered_members]
         winner_id = ordered_ids[0]
 
         leader_picks = {}
@@ -1233,7 +1236,7 @@ async def on_message(message):
             sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is_cc, stats, leader_picks)
         )
 
-        winner_name = message.mentions[0].display_name
+        winner_name = ordered_members[0].display_name
         reply = f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`"
         if leader_picks:
             pick_lines = []
@@ -1300,8 +1303,12 @@ async def on_message(message):
         save_json(STATS_FILE, stats)
 
         # Now record the corrected result
-        ordered_ids   = [m.id for m in message.mentions]
-        ordered_names = [m.display_name for m in message.mentions]
+        raw2 = message.content[len(PREFIX) + len("override"):].strip()
+        raw_ordered_ids2 = [int(uid) for uid in __import__('re').findall(r'<@!?(\d+)>', raw2)]
+        mention_lookup2  = {m.id: m for m in message.mentions}
+        ordered_members2 = [mention_lookup2[uid] for uid in raw_ordered_ids2 if uid in mention_lookup2]
+        ordered_ids   = [m.id for m in ordered_members2]
+        ordered_names = [m.display_name for m in ordered_members2]
         winner_id     = ordered_ids[0]
 
         new_id = process_report(ordered_ids, ordered_names, winner_id, False, cid)
