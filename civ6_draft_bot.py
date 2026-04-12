@@ -1480,7 +1480,37 @@ async def on_message(message):
             await message.channel.send("✅ Announcement posted to website.")
         else:
             await message.channel.send("⚠️ Posted in Discord but website sync failed.")
-   # ── .sync ────────────────────────────────
+   # ── .pushreports ─────────────────────────
+    elif cmd == "pushreports":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("❌ Admin only.")
+            return
+        reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
+        if not reports_channel:
+            await message.channel.send("❌ Could not find reports channel.")
+            return
+        await message.channel.send(f"📋 Pushing {len(reports)} reports to {reports_channel.mention}...")
+        count = 0
+        for rid, r in reports.items():
+            if r.get("discord_msg_id"):
+                continue  # already posted
+            names = r.get("ordered_names", [])
+            placement_text = "\n".join(
+                f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {names[i]}"
+                for i in range(len(names))
+            )
+            try:
+                msg = await reports_channel.send(
+                    f"📋  **Match Report** — ID: `{rid}`\n{placement_text}"
+                )
+                r["discord_msg_id"] = msg.id
+                count += 1
+            except Exception:
+                pass
+        save_json(REPORTS_FILE, reports)
+        await message.channel.send(f"✅ Pushed {count} reports.")
+
+    # ── .sync ────────────────────────────────
     elif cmd == "sync":
         if not message.author.guild_permissions.administrator:
             await message.channel.send("❌ Admin only.")
