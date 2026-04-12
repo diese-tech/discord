@@ -1313,7 +1313,7 @@ async def on_message(message):
         raw = message.content[len(PREFIX) + len("report"):].strip()
         raw_ordered_ids = [int(uid) for uid in __import__('re').findall(r'<@!?(\d+)>', raw)]
         mention_lookup  = {m.id: m for m in message.mentions}
-        ordered_members = [mention_lookup[uid] for uid in raw_ordered_ids if uid in mention_lookup]
+        ordered_members = [mention_lookup[uid] for uid in raw_ordered_ids if uid in mention_lookup and not mention_lookup[uid].bot]
         ordered_ids   = [m.id for m in ordered_members]
         ordered_names = [m.display_name for m in ordered_members]
         winner_id = ordered_ids[0]
