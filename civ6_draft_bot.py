@@ -1564,7 +1564,64 @@ async def on_message(message):
             await message.channel.send("✅ Announcement posted to website.")
         else:
             await message.channel.send("⚠️ Posted in Discord but website sync failed.")
-   # ── .pushreports ─────────────────────────
+   # ── .deletereport <report_id> ────────────
+    elif cmd == "deletereport":
+        if not message.author.guild_permissions.administrator:
+            await message.channel.send("❌ Admin only.")
+            return
+        if not args:
+            await message.channel.send("❌  Usage: `.deletereport <report_id>`")
+            return
+        report_id = args.strip().upper()
+        if report_id not in reports:
+            await message.channel.send(f"❌  Report ID `{report_id}` not found.")
+            return
+
+        # Edit the #reports channel message if it exists
+        old_msg_id = reports[report_id].get("discord_msg_id")
+        reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
+        if reports_channel and old_msg_id:
+            try:
+                old_msg = await reports_channel.fetch_message(old_msg_id)
+                await old_msg.edit(content=f"~~📋  **Match Report** — ID: `{report_id}`~~ *(deleted)*")
+            except Exception:
+                pass
+
+        # Delete and recalculate
+        del reports[report_id]
+        await db_delete_report(report_id)
+
+        for uid_s in stats:
+            stats[uid_s]["rating"] = 1500.0
+            stats[uid_s]["rd"] = 350.0
+            stats[uid_s]["vol"] = 0.06
+            stats[uid_s]["games"] = 0
+            stats[uid_s]["wins"] = 0
+            stats[uid_s]["cc_wins"] = 0
+            stats[uid_s]["first_place"] = 0
+
+        for r in reports.values():
+            r_ids = [int(x) for x in r["ordered_ids"]]
+            r_names = r["ordered_names"]
+            r_data = [get_player(uid, r_names[i]) for i, uid in enumerate(r_ids)]
+            for i, uid in enumerate(r_ids):
+                p = r_data[i]
+                opps = [(r_data[j], 1.0 if i < j else 0.0) for j in range(len(r_ids)) if i != j]
+                glicko2_update(p, opps)
+            for i, uid in enumerate(r_ids):
+                uid_s = str(uid)
+                stats[uid_s]["games"] += 1
+                if i == 0:
+                    stats[uid_s]["wins"] += 1
+                    if r.get("is_cc"):
+                        stats[uid_s]["cc_wins"] += 1
+
+        await db_save_all_stats()
+        await sync_full_stats(stats)
+
+        await message.channel.send(f"✅  Report `{report_id}` deleted and all ratings recalculated.")
+
+    # ── .pushreports ─────────────────────────
     elif cmd == "pushreports":
         if not message.author.guild_permissions.administrator:
             await message.channel.send("❌ Admin only.")
