@@ -60,6 +60,8 @@ async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is
 
         all_players = {}
         for uid_s, p in stats.items():
+            if p.get("games", 0) == 0:
+                continue
             all_players[uid_s] = {
                 "name": p.get("name", "Unknown"),
                 "rating": p.get("rating", 1500),
@@ -67,7 +69,7 @@ async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is
                 "games": p.get("games", 0),
                 "wins": p.get("wins", 0),
                 "cc_wins": p.get("cc_wins", 0),
-		"first_place": p.get("first_place", 0),
+                "first_place": p.get("first_place", 0),
                 "leaders": p.get("leaders", {}),
             }
 
@@ -118,6 +120,8 @@ async def sync_full_stats(stats):
     try:
         all_players = {}
         for uid_s, p in stats.items():
+            if p.get("games", 0) == 0:
+                continue
             all_players[uid_s] = {
                 "name": p.get("name", "Unknown"),
                 "rating": p.get("rating", 1500),
@@ -125,6 +129,7 @@ async def sync_full_stats(stats):
                 "games": p.get("games", 0),
                 "wins": p.get("wins", 0),
                 "cc_wins": p.get("cc_wins", 0),
+                "first_place": p.get("first_place", 0),
                 "leaders": p.get("leaders", {}),
             }
 
