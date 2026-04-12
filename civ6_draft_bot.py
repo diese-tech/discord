@@ -1237,7 +1237,11 @@ async def on_message(message):
         )
 
         winner_name = ordered_members[0].display_name
-        reply = f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`"
+        placement_lines = "\n".join(
+            f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {m.display_name}"
+            for i, m in enumerate(ordered_members)
+        )
+        reply = f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`\n{placement_lines}"
         if leader_picks:
             pick_lines = []
             for pid in ordered_ids:
