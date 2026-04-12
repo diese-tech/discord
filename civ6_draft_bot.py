@@ -1459,7 +1459,7 @@ async def on_message(message):
         ordered_names = [m.display_name for m in ordered_members2]
         winner_id     = ordered_ids[0]
 
-        new_id = process_report(ordered_ids, ordered_names, winner_id, False, cid)
+        new_id = await process_report(ordered_ids, ordered_names, winner_id, False, cid)
 
         # Edit the original report message in #reports channel
         reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
