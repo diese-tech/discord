@@ -70,6 +70,7 @@ async def sync_match_report(report_id, ordered_ids, ordered_names, winner_id, is
                 "wins": p.get("wins", 0),
                 "cc_wins": p.get("cc_wins", 0),
                 "first_place": p.get("first_place", 0),
+                "firstPlace": p.get("first_place", 0),
                 "leaders": p.get("leaders", {}),
             }
 
@@ -130,6 +131,7 @@ async def sync_full_stats(stats):
                 "wins": p.get("wins", 0),
                 "cc_wins": p.get("cc_wins", 0),
                 "first_place": p.get("first_place", 0),
+                "firstPlace": p.get("first_place", 0),
                 "leaders": p.get("leaders", {}),
             }
 
