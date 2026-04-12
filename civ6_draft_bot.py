@@ -1368,7 +1368,7 @@ async def on_message(message):
 
         winner_name = ordered_members[0].display_name
         placement_lines = "\n".join(
-            f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {m.display_name}"
+            f"  {i+1}. {m.display_name}"
             for i, m in enumerate(ordered_members)
         )
         reply = f"✅  Result recorded! **{winner_name}** wins. Report ID: `{report_id}`\n{placement_lines}"
@@ -1394,7 +1394,7 @@ async def on_message(message):
         reports_channel = client.get_channel(REPORTS_CHANNEL_ID)
         if reports_channel:
             placement_text = "\n".join(
-                f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {ordered_names[i]}"
+                f"  {i+1}. {ordered_names[i]}"
                 for i in range(len(ordered_names))
             )
             report_msg = await reports_channel.send(
@@ -1474,7 +1474,7 @@ async def on_message(message):
             try:
                 old_msg = await reports_channel.fetch_message(old_msg_id)
                 new_placement = "\n".join(
-                    f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {ordered_names[i]}"
+                    f"  {i+1}. {ordered_names[i]}"
                     for i in range(len(ordered_names))
                 )
                 await old_msg.edit(content=
@@ -1643,7 +1643,7 @@ async def on_message(message):
                 continue  # already posted
             names = r.get("ordered_names", [])
             placement_text = "\n".join(
-                f"  {'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else f'{i+1}.'} {names[i]}"
+                f"  {i+1}. {names[i]}"
                 for i in range(len(names))
             )
             try:
