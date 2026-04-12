@@ -774,7 +774,13 @@ async def db_load_stats():
         return load_json(STATS_FILE, {})
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, data FROM bot_stats")
-        return {row["user_id"]: dict(row["data"]) for row in rows}
+        result = {}
+        for row in rows:
+            data = row["data"]
+            if isinstance(data, str):
+                data = json.loads(data)
+            result[row["user_id"]] = dict(data)
+        return result
 
 async def db_save_player(uid_s, player_data):
     if not db_pool:
