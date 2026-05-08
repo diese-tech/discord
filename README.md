@@ -28,3 +28,9 @@ This is a Python script that uses the discord.py library to create a Discord bot
 ### Contributing
 
 If you'd like to contribute to this project, please fork the repository and submit a pull request with your changes.
+
+### Required AI Workflow Review
+
+Before beginning AI-assisted implementation, debugging, refactoring, migration, or production fix work in this repository, review [docs/AI_WORKFLOW_GUARDRAILS.md](./docs/AI_WORKFLOW_GUARDRAILS.md).
+
+Default behavior: smallest safe change, lowest blast radius, no unrelated file edits, no speculative rewrites, and explicit consideration of scale, queues, caching, indexes, retries, idempotency, rollback, and operational safety.
